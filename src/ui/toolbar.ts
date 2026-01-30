@@ -8,6 +8,7 @@ export class Toolbar {
   private rectModeBtn: HTMLButtonElement;
   private clearBtn: HTMLButtonElement;
   private redactBtn: HTMLButtonElement;
+  private downloadBtn: HTMLButtonElement;
 
   private _mode: SelectionMode = 'text';
 
@@ -15,6 +16,7 @@ export class Toolbar {
   onModeChange: ((mode: SelectionMode) => void) | null = null;
   onClear: (() => void) | null = null;
   onRedact: (() => void) | null = null;
+  onDownload: (() => void) | null = null;
 
   constructor() {
     this.fileInput = document.getElementById('file-input') as HTMLInputElement;
@@ -24,6 +26,7 @@ export class Toolbar {
     this.rectModeBtn = document.getElementById('btn-rect-mode') as HTMLButtonElement;
     this.clearBtn = document.getElementById('btn-clear') as HTMLButtonElement;
     this.redactBtn = document.getElementById('btn-redact') as HTMLButtonElement;
+    this.downloadBtn = document.getElementById('btn-download') as HTMLButtonElement;
 
     this.fileInput.addEventListener('change', () => {
       const file = this.fileInput.files?.[0];
@@ -38,6 +41,7 @@ export class Toolbar {
     this.rectModeBtn.addEventListener('click', () => this.setMode('rect'));
     this.clearBtn.addEventListener('click', () => this.onClear?.());
     this.redactBtn.addEventListener('click', () => this.onRedact?.());
+    this.downloadBtn.addEventListener('click', () => this.onDownload?.());
   }
 
   get mode(): SelectionMode {
@@ -55,5 +59,10 @@ export class Toolbar {
   showControls(): void {
     this.modeGroup.hidden = false;
     this.actionGroup.hidden = false;
+  }
+
+  /** ダウンロードボタンを表示する */
+  showDownload(): void {
+    this.downloadBtn.hidden = false;
   }
 }

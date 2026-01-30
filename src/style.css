@@ -12,11 +12,13 @@
   --border: #444;
   --text: #e0e0e0;
   --text-muted: #999;
-  --primary: #4a9eff;
-  --primary-hover: #3a8eef;
-  --danger: #ff4a4a;
-  --redact-preview: rgba(255, 0, 0, 0.25);
-  --redact-border: rgba(255, 0, 0, 0.6);
+  --primary: #005AFF;
+  --primary-hover: #0050E0;
+  --danger: #FF4B00;
+  --redact-preview: rgba(255, 75, 0, 0.25);
+  --redact-border: rgba(255, 75, 0, 0.6);
+  --success: #03AF7A;
+  --success-hover: #029A6C;
 }
 
 html, body {
@@ -94,7 +96,17 @@ html, body {
 }
 
 .action-btn.primary:hover {
-  background: #e04040;
+  background: #E04300;
+}
+
+.action-btn.download {
+  background: var(--success);
+  border-color: var(--success);
+  color: #fff;
+}
+
+.action-btn.download:hover {
+  background: var(--success-hover);
 }
 
 /* ビューアー */
@@ -125,7 +137,7 @@ html, body {
 
 #drop-zone.dragover {
   border-color: var(--primary);
-  background: rgba(74, 158, 255, 0.05);
+  background: rgba(0, 90, 255, 0.05);
 }
 
 #page-wrapper {
@@ -162,7 +174,7 @@ html, body {
 }
 
 #text-layer span::selection {
-  background: rgba(74, 158, 255, 0.4);
+  background: rgba(77, 196, 255, 0.4);
 }
 
 #text-layer.selecting-text span {
@@ -192,7 +204,7 @@ html, body {
 
 #overlay-layer .rect-drawing {
   position: absolute;
-  background: rgba(74, 158, 255, 0.2);
+  background: rgba(0, 90, 255, 0.2);
   border: 1px dashed var(--primary);
   pointer-events: none;
 }

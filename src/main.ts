@@ -16,6 +16,7 @@ class App {
   private store: RedactionStore;
 
   private originalBytes: ArrayBuffer | null = null;
+  private redactedBytes: Uint8Array | null = null;
   private dropZone: HTMLElement;
   private pageWrapper: HTMLElement;
 
@@ -70,6 +71,9 @@ class App {
 
     // 墨消し実行
     this.toolbar.onRedact = () => this.executeRedaction();
+
+    // ダウンロード
+    this.toolbar.onDownload = () => this.downloadRedacted();
 
     // オーバーレイの墨消し矩形クリック(削除)
     this.overlay.onRectClick = (pageNum, index) => {
@@ -147,16 +151,32 @@ class App {
     }
 
     try {
-      const redactedBytes = await redactPdf(
+      this.redactedBytes = await redactPdf(
         this.originalBytes,
         this.store.getAllRects(),
       );
-      downloadPdf(redactedBytes, 'redacted.pdf');
+
+      // 墨消し結果でプレビューを更新する
+      // 墨消し済みバイトを新しいoriginalBytesとして保持し、追加の墨消しに備える
+      this.originalBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
+      this.store.clear();
+      const viewerBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
+      await this.viewer.load(viewerBytes);
+      this.selection.enable();
+      this.toolbar.showDownload();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       console.error('墨消し処理エラー:', e.message, e.stack);
       alert(`墨消し処理中にエラーが発生しました。\n${e.message}`);
     }
+  }
+
+  private downloadRedacted(): void {
+    if (!this.redactedBytes) {
+      alert('先に墨消しを実行してください。');
+      return;
+    }
+    downloadPdf(this.redactedBytes, 'redacted.pdf');
   }
 }
 
