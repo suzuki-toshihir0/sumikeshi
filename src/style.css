@@ -14,6 +14,10 @@
   --text-muted: #999;
   --primary: #005AFF;
   --primary-hover: #0050E0;
+  --sky: #4DC4FF;
+  --sky-hover: #3AB0E8;
+  --yellow: #FFF100;
+  --yellow-hover: #E0D600;
   --danger: #FF4B00;
   --redact-preview: rgba(255, 75, 0, 0.25);
   --redact-border: rgba(255, 75, 0, 0.6);
@@ -118,14 +122,14 @@ html, body {
 }
 
 .mode-btn.active {
-  color: #fff;
+  color: #000;
 }
 
 .mode-slider {
   position: absolute;
   top: 2px;
   height: calc(100% - 4px);
-  background: var(--primary);
+  background: var(--yellow);
   border-radius: 4px;
   transition: left 0.2s ease, width 0.2s ease;
   pointer-events: none;
