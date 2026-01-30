@@ -161,7 +161,8 @@ class App {
       this.originalBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
       this.store.clear();
       const viewerBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
-      await this.viewer.load(viewerBytes);
+      const currentPage = this.viewer.currentPageNumber;
+      await this.viewer.load(viewerBytes, currentPage);
       this.selection.enable();
       this.toolbar.showDownload();
     } catch (err) {

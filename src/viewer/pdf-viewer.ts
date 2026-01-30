@@ -41,11 +41,12 @@ export class PdfViewer {
   }
 
   /** PDFをArrayBufferから読み込む */
-  async load(data: ArrayBuffer): Promise<void> {
+  async load(data: ArrayBuffer, initialPage?: number): Promise<void> {
     this.doc = await pdfjsLib.getDocument({ data }).promise;
     this._totalPages = this.doc.numPages;
-    this._currentPageNumber = 1;
-    await this.renderPage(1);
+    const page = Math.min(initialPage ?? 1, this._totalPages);
+    this._currentPageNumber = page;
+    await this.renderPage(page);
   }
 
   /** 指定ページを描画する */
