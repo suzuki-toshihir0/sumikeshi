@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'none';
+             script-src 'self';
+             style-src 'self' 'unsafe-inline';
+             img-src 'self' blob: data:;
+             font-src 'self';
+             worker-src 'self' blob:;
+             connect-src 'none';" />
+  <title>sumikeshi - PDF墨消しツール</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <div id="app">
+    <header id="toolbar">
+      <div class="toolbar-group">
+        <label class="file-select-btn" tabindex="0">
+          PDF を開く
+          <input type="file" id="file-input" accept=".pdf,application/pdf" hidden />
+        </label>
+      </div>
+      <div class="toolbar-group mode-group" hidden>
+        <button id="btn-text-mode" class="mode-btn active" title="テキスト選択モード">テキスト選択</button>
+        <button id="btn-rect-mode" class="mode-btn" title="矩形選択モード">矩形選択</button>
+      </div>
+      <div class="toolbar-group action-group" hidden>
+        <button id="btn-clear" class="action-btn" title="選択をクリア">クリア</button>
+        <button id="btn-redact" class="action-btn primary" title="墨消し実行">墨消し実行</button>
+      </div>
+    </header>
+
+    <main id="viewer-container">
+      <div id="drop-zone">
+        <p>PDFファイルをドラッグ＆ドロップ、<br>または上の「PDF を開く」ボタンから選択</p>
+      </div>
+      <div id="page-wrapper" hidden>
+        <div id="page-container">
+          <canvas id="pdf-canvas"></canvas>
+          <div id="text-layer"></div>
+          <div id="overlay-layer"></div>
+        </div>
+      </div>
+    </main>
+
+    <footer id="page-nav" hidden>
+      <button id="btn-prev" title="前のページ">&#9664; 前</button>
+      <span id="page-info">1 / 1</span>
+      <button id="btn-next" title="次のページ">次 &#9654;</button>
+    </footer>
+  </div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

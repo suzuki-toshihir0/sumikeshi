@@ -1,0 +1,236 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #1e1e1e;
+  --surface: #2d2d2d;
+  --border: #444;
+  --text: #e0e0e0;
+  --text-muted: #999;
+  --primary: #4a9eff;
+  --primary-hover: #3a8eef;
+  --danger: #ff4a4a;
+  --redact-preview: rgba(255, 0, 0, 0.25);
+  --redact-border: rgba(255, 0, 0, 0.6);
+}
+
+html, body {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ツールバー */
+#toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-select-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  background: var(--primary);
+  color: #fff;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  user-select: none;
+}
+
+.file-select-btn:hover {
+  background: var(--primary-hover);
+}
+
+.mode-btn,
+.action-btn {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.mode-btn:hover,
+.action-btn:hover {
+  background: #3a3a3a;
+}
+
+.mode-btn.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.action-btn.primary {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.action-btn.primary:hover {
+  background: #e04040;
+}
+
+/* ビューアー */
+#viewer-container {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 16px;
+}
+
+#drop-zone {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  max-width: 600px;
+  height: 300px;
+  margin-top: 80px;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.8;
+  font-size: 15px;
+}
+
+#drop-zone.dragover {
+  border-color: var(--primary);
+  background: rgba(74, 158, 255, 0.05);
+}
+
+#page-wrapper {
+  display: flex;
+  justify-content: center;
+}
+
+#page-container {
+  position: relative;
+  display: inline-block;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+
+#pdf-canvas {
+  display: block;
+}
+
+#text-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  opacity: 0.3;
+  line-height: 1.0;
+}
+
+#text-layer span {
+  position: absolute;
+  white-space: pre;
+  color: transparent;
+  pointer-events: auto;
+}
+
+#text-layer span::selection {
+  background: rgba(74, 158, 255, 0.4);
+}
+
+#text-layer.selecting-text span {
+  cursor: text;
+}
+
+#overlay-layer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+#overlay-layer .redaction-rect {
+  position: absolute;
+  background: var(--redact-preview);
+  border: 1px solid var(--redact-border);
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+#overlay-layer .redaction-rect:hover {
+  background: rgba(255, 0, 0, 0.35);
+}
+
+#overlay-layer .rect-drawing {
+  position: absolute;
+  background: rgba(74, 158, 255, 0.2);
+  border: 1px dashed var(--primary);
+  pointer-events: none;
+}
+
+/* ページナビゲーション */
+#page-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+#page-nav button {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+#page-nav button:hover:not(:disabled) {
+  background: #3a3a3a;
+}
+
+#page-nav button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+#page-info {
+  font-size: 14px;
+  color: var(--text-muted);
+  min-width: 60px;
+  text-align: center;
+}
