@@ -85,10 +85,17 @@ function removeTextOperatorsFromStream(
 
     // BTブロック内を処理
     const blockContent = match[1];
-    const processedBlock = processTextBlock(blockContent, redactRects);
-    result.push('BT');
-    result.push(processedBlock);
-    result.push('ET');
+    const { content: processedBlock, allTextRedacted } = processTextBlock(blockContent, redactRects);
+
+    if (allTextRedacted) {
+      // ブロック内の全テキスト描画オペレーターが墨消しされた場合、
+      // BT...ETブロックごと削除する。
+      // テキスト状態はBT...ETにスコープされるため外部への副作用はない。
+    } else {
+      result.push('BT');
+      result.push(processedBlock);
+      result.push('ET');
+    }
 
     lastIndex = match.index + match[0].length;
   }
@@ -103,16 +110,22 @@ function removeTextOperatorsFromStream(
  * テキスト行列(Tm)とテキスト位置(Td, TD)を追跡し、
  * フォントサイズ(Tf)を考慮して、テキストの位置を推定する。
  * 墨消し領域と重なるテキスト描画オペレーターのみを空に置換する。
+ *
+ * @returns content: 処理後のブロック内容, allTextRedacted: 全テキスト描画オペレーターが墨消しされたか
  */
 function processTextBlock(
   blockContent: string,
   redactRects: PdfRect[],
-): string {
+): { content: string; allTextRedacted: boolean } {
   // テキスト状態
   let fontSize = 12;
   // テキスト行列: [a, b, c, d, e, f] — 位置は (e, f)
   let tmE = 0, tmF = 0;
   let lineX = 0, lineY = 0;
+
+  // テキスト描画オペレーターのカウント
+  let textOpTotal = 0;
+  let textOpRedacted = 0;
 
   // オペレーターを1つずつ処理するためにトークン化
   // PDFのContentStreamはスタックベース: オペランド... オペレーター
@@ -177,8 +190,10 @@ function processTextBlock(
             height: fontSize * 1.2,
           };
 
+          textOpTotal++;
           const shouldRedact = redactRects.some((r) => rectsOverlap(textRect, r));
           if (shouldRedact) {
+            textOpRedacted++;
             // テキストオペレーターを空文字列に置換
             outputTokens.push('() Tj');
           } else {
@@ -200,7 +215,13 @@ function processTextBlock(
     outputTokens.push(operandStack.join(' '));
   }
 
-  return '\n' + outputTokens.join('\n') + '\n';
+  // 全テキスト描画オペレーターが墨消しされたかどうか
+  const allTextRedacted = textOpTotal > 0 && textOpRedacted === textOpTotal;
+
+  return {
+    content: '\n' + outputTokens.join('\n') + '\n',
+    allTextRedacted,
+  };
 }
 
 /**
