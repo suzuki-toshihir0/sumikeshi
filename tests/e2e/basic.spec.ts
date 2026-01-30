@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test';
-import { resolve } from 'path';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const samplePdf = resolve(__dirname, '../fixtures/sample.pdf');
 
 test.describe('PDF墨消しツール', () => {
@@ -55,16 +58,22 @@ test.describe('PDF墨消しツール', () => {
     await page.goto('/');
     await page.locator('#file-input').setInputFiles(samplePdf);
 
+    // PDF描画完了を待つ
+    await expect(page.locator('#pdf-canvas')).toBeVisible();
+    await expect(page.locator('#page-info')).toContainText('1 / 2');
+
     // 矩形選択モードに切り替え
     await page.locator('#btn-rect-mode').click();
+    await expect(page.locator('#btn-rect-mode')).toHaveClass(/active/);
 
     // ページコンテナ上でドラッグ
     const container = page.locator('#page-container');
     const box = await container.boundingBox();
+    expect(box).toBeTruthy();
     if (box) {
       await page.mouse.move(box.x + 50, box.y + 80);
       await page.mouse.down();
-      await page.mouse.move(box.x + 300, box.y + 110);
+      await page.mouse.move(box.x + 300, box.y + 120, { steps: 5 });
       await page.mouse.up();
     }
 
