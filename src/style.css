@@ -45,13 +45,21 @@ html, body {
   flex-shrink: 0;
 }
 
-.toolbar-group {
+.toolbar-group:not([hidden]) {
   display: flex;
   align-items: center;
   gap: 6px;
 }
 
+.toolbar-separator:not([hidden]) {
+  width: 1px;
+  height: 24px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
 .file-select-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   padding: 6px 14px;
@@ -61,13 +69,69 @@ html, body {
   cursor: pointer;
   font-size: 14px;
   user-select: none;
+  overflow: hidden;
+}
+
+.file-select-btn input[type="file"] {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 0;
 }
 
 .file-select-btn:hover {
   background: var(--primary-hover);
 }
 
-.mode-btn,
+/* モード切替トグル */
+.mode-toggle {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  background: #1e1e1e;
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.mode-btn {
+  position: relative;
+  z-index: 1;
+  padding: 5px 14px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  text-align: center;
+  white-space: nowrap;
+  transition: color 0.2s;
+  user-select: none;
+}
+
+.mode-btn:hover {
+  color: var(--text);
+}
+
+.mode-btn.active {
+  color: #fff;
+}
+
+.mode-slider {
+  position: absolute;
+  top: 2px;
+  height: calc(100% - 4px);
+  background: var(--primary);
+  border-radius: 4px;
+  transition: left 0.2s ease, width 0.2s ease;
+  pointer-events: none;
+}
+
+/* アクションボタン */
 .action-btn {
   padding: 6px 12px;
   border: 1px solid var(--border);
@@ -78,15 +142,8 @@ html, body {
   font-size: 13px;
 }
 
-.mode-btn:hover,
 .action-btn:hover {
   background: #3a3a3a;
-}
-
-.mode-btn.active {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: #fff;
 }
 
 .action-btn.primary {
@@ -119,7 +176,7 @@ html, body {
   padding: 16px;
 }
 
-#drop-zone {
+#drop-zone:not([hidden]) {
   display: flex;
   justify-content: center;
   align-items: center;
@@ -140,7 +197,7 @@ html, body {
   background: rgba(0, 90, 255, 0.05);
 }
 
-#page-wrapper {
+#page-wrapper:not([hidden]) {
   display: flex;
   justify-content: center;
 }
@@ -210,7 +267,7 @@ html, body {
 }
 
 /* ページナビゲーション */
-#page-nav {
+#page-nav:not([hidden]) {
   display: flex;
   align-items: center;
   justify-content: center;

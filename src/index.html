@@ -18,17 +18,21 @@
   <div id="app">
     <header id="toolbar">
       <div class="toolbar-group">
-        <label class="file-select-btn" tabindex="0">
-          PDF を開く
-          <input type="file" id="file-input" accept=".pdf,application/pdf" hidden />
+        <label class="file-select-btn">
+          <span>PDF を開く</span>
+          <input type="file" id="file-input" accept=".pdf,application/pdf" />
         </label>
       </div>
+      <div class="toolbar-separator mode-group" hidden></div>
       <div class="toolbar-group mode-group" hidden>
-        <button id="btn-text-mode" class="mode-btn active" title="テキスト選択モード">テキスト選択</button>
-        <button id="btn-rect-mode" class="mode-btn" title="矩形選択モード">矩形選択</button>
+        <div class="mode-toggle">
+          <button id="btn-text-mode" class="mode-btn active" title="テキスト選択モード">テキスト選択</button>
+          <button id="btn-rect-mode" class="mode-btn" title="矩形選択モード">矩形選択</button>
+          <span class="mode-slider"></span>
+        </div>
       </div>
       <div class="toolbar-group action-group" hidden>
-        <button id="btn-clear" class="action-btn" title="選択をクリア">クリア</button>
+        <button id="btn-clear" class="action-btn" title="選択範囲をクリア">選択範囲をクリア</button>
         <button id="btn-redact" class="action-btn primary" title="墨消し実行">墨消し実行</button>
         <button id="btn-download" class="action-btn download" title="墨消し済みPDFをダウンロード" hidden>ダウンロード</button>
       </div>
