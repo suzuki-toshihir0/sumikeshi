@@ -254,6 +254,10 @@ html, body {
   position: absolute;
   white-space: pre;
   color: transparent;
+  pointer-events: none;
+}
+
+#text-layer.selecting-text span {
   pointer-events: auto;
 }
 
@@ -329,4 +333,41 @@ html, body {
   color: var(--text-muted);
   min-width: 60px;
   text-align: center;
+}
+
+/* モバイル対応 */
+@media (max-width: 768px) {
+  #toolbar {
+    padding: 6px 10px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .file-select-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .action-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .mode-btn {
+    width: 44px;
+    height: 40px;
+  }
+
+  #viewer-container {
+    padding: 8px;
+  }
+
+  #drop-zone:not([hidden]) {
+    height: 200px;
+    margin-top: 40px;
+  }
+
+  #page-nav button {
+    padding: 8px 16px;
+  }
 }

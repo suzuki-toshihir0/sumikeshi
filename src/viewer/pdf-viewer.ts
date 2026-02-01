@@ -17,15 +17,17 @@ export class PdfViewer {
 
   private canvas: HTMLCanvasElement;
   private textLayerEl: HTMLElement;
+  private containerEl: HTMLElement;
 
   /** ページ変更時コールバック */
   onPageChange: ((pageNum: number, total: number) => void) | null = null;
   /** ページ描画完了コールバック */
   onPageRendered: ((pageNum: number, viewport: PageViewport) => void) | null = null;
 
-  constructor(canvas: HTMLCanvasElement, textLayerEl: HTMLElement) {
+  constructor(canvas: HTMLCanvasElement, textLayerEl: HTMLElement, containerEl: HTMLElement) {
     this.canvas = canvas;
     this.textLayerEl = textLayerEl;
+    this.containerEl = containerEl;
   }
 
   get currentPageNumber(): number {
@@ -53,6 +55,23 @@ export class PdfViewer {
     await this.renderPage(page);
   }
 
+  /** コンテナ幅に収まるスケールを計算する */
+  private calcFitWidthScale(page: PDFPageProxy): number {
+    const style = getComputedStyle(this.containerEl);
+    const paddingLeft = parseFloat(style.paddingLeft) || 0;
+    const paddingRight = parseFloat(style.paddingRight) || 0;
+    const availableWidth = this.containerEl.clientWidth - paddingLeft - paddingRight;
+    const pageWidth = page.getViewport({ scale: 1 }).width;
+    const fitScale = availableWidth / pageWidth;
+    return Math.min(Math.max(fitScale, 0.5), 2.5);
+  }
+
+  /** 現在のページをリサイズに合わせて再描画する */
+  async resize(): Promise<void> {
+    if (!this.doc || !this.currentPage) return;
+    await this.renderPage(this._currentPageNumber);
+  }
+
   /** 指定ページを描画する */
   async renderPage(pageNum: number): Promise<void> {
     if (!this.doc) return;
@@ -60,6 +79,7 @@ export class PdfViewer {
 
     this._currentPageNumber = pageNum;
     this.currentPage = await this.doc.getPage(pageNum);
+    this.scale = this.calcFitWidthScale(this.currentPage);
     this._viewport = this.currentPage.getViewport({ scale: this.scale });
 
     // Canvas描画

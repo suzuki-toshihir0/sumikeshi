@@ -32,6 +32,10 @@ export class Overlay {
       el.addEventListener('click', () => {
         this.onRectClick?.(pageNum, index);
       });
+      el.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        this.onRectClick?.(pageNum, index);
+      });
       this.container.appendChild(el);
     });
   }
