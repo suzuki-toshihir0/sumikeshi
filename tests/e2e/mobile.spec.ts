@@ -109,7 +109,7 @@ test.describe('モバイル対応', () => {
 
   test('ドロップゾーンのテキストがモバイル向け', async ({ page }) => {
     await page.goto('/');
-    // ontouchstartがあるデバイスでは「PDFを選択」と表示
-    await expect(page.locator('#drop-zone')).toContainText('PDFを選択');
+    // ontouchstartがあるデバイスでは「PDFを開くボタンからPDFを選択」と表示
+    await expect(page.locator('#drop-zone')).toContainText('PDFを開くボタンからPDFを選択');
   });
 });

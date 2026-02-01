@@ -40,7 +40,7 @@ class App {
     this.setupEventHandlers();
     this.setupDragAndDrop();
     this.setupResizeHandler();
-    this.setupMobileDropZone();
+    this.setupMobileDropZoneText();
   }
 
   private setupEventHandlers(): void {
@@ -113,14 +113,9 @@ class App {
     });
   }
 
-  private setupMobileDropZone(): void {
+  private setupMobileDropZoneText(): void {
     if ('ontouchstart' in window) {
-      this.dropZone.textContent = 'PDFを選択';
-      this.dropZone.style.cursor = 'pointer';
-      this.dropZone.addEventListener('click', () => {
-        const fileInput = document.getElementById('file-input') as HTMLInputElement;
-        fileInput.click();
-      });
+      this.dropZone.textContent = 'PDFを開くボタンからPDFを選択';
     }
   }
 
