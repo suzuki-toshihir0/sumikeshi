@@ -63,18 +63,29 @@ html, body {
   flex-shrink: 0;
 }
 
+.action-group .toolbar-separator {
+  margin: 0 6px;
+}
+
 .file-select-btn {
   position: relative;
   display: inline-flex;
   align-items: center;
-  padding: 6px 14px;
-  background: var(--primary);
-  color: #fff;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
   border-radius: 4px;
   cursor: pointer;
-  font-size: 14px;
   user-select: none;
   overflow: hidden;
+}
+
+.file-select-btn svg {
+  flex-shrink: 0;
 }
 
 .file-select-btn input[type="file"] {
@@ -89,7 +100,7 @@ html, body {
 }
 
 .file-select-btn:hover {
-  background: var(--primary-hover);
+  background: #3a3a3a;
 }
 
 /* モード切替トグル */
@@ -105,15 +116,17 @@ html, body {
 .mode-btn {
   position: relative;
   z-index: 1;
-  padding: 5px 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 32px;
+  padding: 0;
   border: none;
   border-radius: 4px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 13px;
-  text-align: center;
-  white-space: nowrap;
   transition: color 0.2s;
   user-select: none;
 }
@@ -123,28 +136,36 @@ html, body {
 }
 
 .mode-btn.active {
-  color: #000;
+  color: #fff;
 }
 
 .mode-slider {
   position: absolute;
   top: 2px;
   height: calc(100% - 4px);
-  background: var(--yellow);
+  background: #888;
   border-radius: 4px;
   transition: left 0.2s ease, width 0.2s ease;
   pointer-events: none;
 }
 
 /* アクションボタン */
+.action-btn[hidden] {
+  display: none;
+}
+
 .action-btn {
-  padding: 6px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
-  font-size: 13px;
 }
 
 .action-btn:hover {
@@ -162,13 +183,13 @@ html, body {
 }
 
 .action-btn.download {
-  background: var(--success);
-  border-color: var(--success);
-  color: #fff;
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
 }
 
 .action-btn.download:hover {
-  background: var(--success-hover);
+  background: #3a3a3a;
 }
 
 /* ビューアー */
