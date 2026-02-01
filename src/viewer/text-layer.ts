@@ -10,8 +10,8 @@ export async function renderTextLayer(
 ): Promise<void> {
   // 既存のテキストレイヤーをクリア
   container.innerHTML = '';
-  container.style.width = `${viewport.width}px`;
-  container.style.height = `${viewport.height}px`;
+  // PDF.jsのTextLayerはCSS変数でスパンのフォントサイズ・配置を計算する
+  container.style.setProperty('--scale-factor', String(viewport.scale));
 
   const textLayer = new TextLayer({
     textContentSource: textContent,
