@@ -72,8 +72,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -119,8 +119,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 32px;
+  width: 44px;
+  height: 40px;
   padding: 0;
   border: none;
   border-radius: 4px;
@@ -158,8 +158,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -341,21 +341,6 @@ html, body {
     padding: 6px 10px;
     gap: 8px;
     flex-wrap: wrap;
-  }
-
-  .file-select-btn {
-    width: 44px;
-    height: 44px;
-  }
-
-  .action-btn {
-    width: 44px;
-    height: 44px;
-  }
-
-  .mode-btn {
-    width: 44px;
-    height: 40px;
   }
 
   #viewer-container {
