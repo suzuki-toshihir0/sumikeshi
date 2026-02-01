@@ -22,7 +22,7 @@
   - `ui/` — ツールバー、ページナビ、オーバーレイ
   - `utils/` — 座標変換、ファイルI/O
 - `tests/unit/` — Vitestによる単体テスト
-- `tests/e2e/` — Playwrightによるe2eテスト
+- `tests/e2e/` — Playwrightによるe2eテスト（`basic.spec.ts`=デスクトップ、`mobile.spec.ts`=モバイル）
 - `tests/fixtures/` — テスト用PDF（`npx tsx tests/fixtures/generate-sample.ts` で再生成可能）
 
 ### 技術スタック
@@ -48,6 +48,12 @@
 4. 墨消し領域に黒塗り矩形を `page.drawRectangle()` で描画
 5. メタデータを全クリア
 6. `PDFDocument.save()` で出力
+
+### E2Eテストの注意事項
+
+- **モバイルE2Eはprojects分離**: `playwright.config.ts` の `projects` でdesktop/mobileを振り分け。モバイルは `devices['iPhone 14']` + Chromium（CDPセッション利用のため）。
+- **タッチドラッグ**: Playwrightの `page.touchscreen` は `tap()` のみ提供。ドラッグはCDP `Input.dispatchTouchEvent` で `touchStart` → `touchMove`（複数ステップ）→ `touchEnd` を送る。
+- **テキスト選択モードのモバイルE2Eは未実装**: テキスト選択モード（`text-selection.ts`）はモバイルで `selectionchange` イベントのデバウンス（500ms）経由で動作するが、E2Eテストが困難なため意図的にスキップしている。理由: モバイルのテキスト選択はOS/ブラウザのネイティブlong-press動作に依存しており、Playwrightにはlong-press APIがない。CDPで `touchStart` を長時間保持してもChromiumがネイティブテキスト選択として認識する保証がなく、テストが不安定になる。
 
 ## コーディング規約
 
