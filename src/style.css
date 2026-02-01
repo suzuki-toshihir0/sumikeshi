@@ -72,8 +72,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -119,8 +119,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 32px;
+  width: 44px;
+  height: 40px;
   padding: 0;
   border: none;
   border-radius: 4px;
@@ -158,8 +158,8 @@ html, body {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 4px;
@@ -254,6 +254,10 @@ html, body {
   position: absolute;
   white-space: pre;
   color: transparent;
+  pointer-events: none;
+}
+
+#text-layer.selecting-text span {
   pointer-events: auto;
 }
 
@@ -329,4 +333,26 @@ html, body {
   color: var(--text-muted);
   min-width: 60px;
   text-align: center;
+}
+
+/* モバイル対応 */
+@media (max-width: 768px) {
+  #toolbar {
+    padding: 6px 10px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  #viewer-container {
+    padding: 8px;
+  }
+
+  #drop-zone:not([hidden]) {
+    height: 200px;
+    margin-top: 40px;
+  }
+
+  #page-nav button {
+    padding: 8px 16px;
+  }
 }

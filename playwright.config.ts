@@ -1,4 +1,4 @@
-import { defineConfig } from '@playwright/test';
+import { defineConfig, devices } from '@playwright/test';
 
 export default defineConfig({
   testDir: 'tests/e2e',
@@ -10,4 +10,19 @@ export default defineConfig({
   use: {
     baseURL: 'http://localhost:5173/sumikeshi/',
   },
+  projects: [
+    {
+      name: 'desktop',
+      testMatch: /basic\.spec\.ts/,
+    },
+    {
+      name: 'mobile',
+      use: {
+        ...devices['iPhone 14'],
+        // CDPセッション（タッチドラッグテスト）にはChromiumが必要
+        browserName: 'chromium',
+      },
+      testMatch: /mobile\.spec\.ts/,
+    },
+  ],
 });

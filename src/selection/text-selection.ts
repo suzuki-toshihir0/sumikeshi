@@ -6,6 +6,7 @@ export class TextSelection {
   private enabled = false;
   private pageNum = 1;
   private viewport: PageViewport | null = null;
+  private selectionChangeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 選択追加時コールバック */
   onSelectionAdded: (() => void) | null = null;
@@ -15,6 +16,7 @@ export class TextSelection {
     private store: RedactionStore,
   ) {
     this.textLayerEl.addEventListener('mouseup', this.handleMouseUp);
+    document.addEventListener('selectionchange', this.handleSelectionChange);
   }
 
   setEnabled(enabled: boolean): void {
@@ -27,6 +29,27 @@ export class TextSelection {
   }
 
   private handleMouseUp = (): void => {
+    // mouseup発火時はselectionchangeのデバウンスをキャンセルして即確定
+    if (this.selectionChangeTimer) {
+      clearTimeout(this.selectionChangeTimer);
+      this.selectionChangeTimer = null;
+    }
+    this.commitSelection();
+  };
+
+  private handleSelectionChange = (): void => {
+    if (!this.enabled) return;
+    // デバウンスで選択が安定したら確定（モバイルのlong-press対応）
+    if (this.selectionChangeTimer) {
+      clearTimeout(this.selectionChangeTimer);
+    }
+    this.selectionChangeTimer = setTimeout(() => {
+      this.selectionChangeTimer = null;
+      this.commitSelection();
+    }, 500);
+  };
+
+  private commitSelection(): void {
     if (!this.enabled || !this.viewport) return;
 
     const selection = document.getSelection();
@@ -55,9 +78,13 @@ export class TextSelection {
 
     selection.removeAllRanges();
     this.onSelectionAdded?.();
-  };
+  }
 
   destroy(): void {
     this.textLayerEl.removeEventListener('mouseup', this.handleMouseUp);
+    document.removeEventListener('selectionchange', this.handleSelectionChange);
+    if (this.selectionChangeTimer) {
+      clearTimeout(this.selectionChangeTimer);
+    }
   }
 }

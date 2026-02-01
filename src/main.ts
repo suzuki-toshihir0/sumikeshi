@@ -28,8 +28,10 @@ class App {
     this.dropZone = document.getElementById('drop-zone') as HTMLElement;
     this.pageWrapper = document.getElementById('page-wrapper') as HTMLElement;
 
+    const viewerContainerEl = document.getElementById('viewer-container') as HTMLElement;
+
     this.store = new RedactionStore();
-    this.viewer = new PdfViewer(canvas, textLayerEl);
+    this.viewer = new PdfViewer(canvas, textLayerEl, viewerContainerEl);
     this.toolbar = new Toolbar();
     this.pageNav = new PageNavigator();
     this.overlay = new Overlay(overlayEl, this.store);
@@ -37,6 +39,8 @@ class App {
 
     this.setupEventHandlers();
     this.setupDragAndDrop();
+    this.setupResizeHandler();
+    this.setupMobileDropZoneText();
   }
 
   private setupEventHandlers(): void {
@@ -97,6 +101,22 @@ class App {
       originalAdd(pageNum, rect);
       this.refreshOverlay();
     };
+  }
+
+  private setupResizeHandler(): void {
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    window.addEventListener('resize', () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        this.viewer.resize();
+      }, 200);
+    });
+  }
+
+  private setupMobileDropZoneText(): void {
+    if ('ontouchstart' in window) {
+      this.dropZone.textContent = 'PDFを開くボタンからPDFを選択';
+    }
   }
 
   private setupDragAndDrop(): void {
