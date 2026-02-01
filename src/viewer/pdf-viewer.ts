@@ -82,10 +82,14 @@ export class PdfViewer {
     this.scale = this.calcFitWidthScale(this.currentPage);
     this._viewport = this.currentPage.getViewport({ scale: this.scale });
 
-    // Canvas描画
-    this.canvas.width = this._viewport.width;
-    this.canvas.height = this._viewport.height;
+    // Canvas描画（高DPIデバイス対応）
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = this._viewport.width * dpr;
+    this.canvas.height = this._viewport.height * dpr;
+    this.canvas.style.width = `${this._viewport.width}px`;
+    this.canvas.style.height = `${this._viewport.height}px`;
     const ctx = this.canvas.getContext('2d')!;
+    ctx.scale(dpr, dpr);
     await this.currentPage.render({
       canvasContext: ctx,
       viewport: this._viewport,
