@@ -35,7 +35,8 @@ export interface RedactOptions {
 }
 
 function defaultCMapLoader(): CMapLoader | undefined {
-  if (typeof window === 'undefined' || typeof fetch !== 'function') return undefined;
+  // ブラウザ（画面と Web Worker の両方）でだけ使う。Node（試験）には location が無い
+  if (typeof fetch !== 'function' || typeof location === 'undefined') return undefined;
   const base = `${import.meta.env.BASE_URL}cmaps/`;
   return async (name: string) => {
     const res = await fetch(`${base}${name}.bcmap`);

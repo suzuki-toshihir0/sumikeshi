@@ -77,6 +77,14 @@ export class Toolbar {
     requestAnimationFrame(() => this.updateSlider());
   }
 
+  /** 墨消しの処理中は、もう一度押せないようにする */
+  setBusy(busy: boolean): void {
+    this.redactBtn.disabled = busy;
+    this.downloadBtn.disabled = busy;
+    this.redactBtn.title = busy ? '墨消しの処理中…' : '選択した範囲を墨消し';
+    document.body.style.cursor = busy ? 'progress' : '';
+  }
+
   /** ダウンロードボタンを表示する */
   showDownload(): void {
     this.downloadBtn.hidden = false;

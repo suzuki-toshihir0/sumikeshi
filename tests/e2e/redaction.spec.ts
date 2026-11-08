@@ -104,4 +104,20 @@ test.describe('ブラウザでの墨消し', () => {
     expect(text).not.toContain('花子');
     expect(text).toContain('生年月日');
   });
+
+  test('定義済みの CMap の日本語の PDF: Worker の中から cmaps/ を読み、氏名が消える', async ({ page }) => {
+    const errors = collectErrors(page);
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('cmap.pdf'));
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    // 「見本花子」は x=110〜190（1 文字 20pt）、y=700 の行
+    await dragPdfRect(page, 595, 842, { x: 111, y: 693, width: 78, height: 25 });
+    const after = await redactAndDownload(page);
+    expect(errors).toEqual([]);
+    const text = await allText(after);
+    expect(text).not.toContain('花子');
+    expect(text).toContain('氏名');
+    expect(text).toContain('架空県');
+  });
 });

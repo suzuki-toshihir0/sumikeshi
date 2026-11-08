@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PDFDocument, PDFName } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString } from 'pdf-lib';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const PLACE = { x: 50, y: 500, width: 400, height: 150 };
@@ -57,7 +57,32 @@ async function cmyk(): Promise<void> {
   writeFileSync(join(dir, 'cmyk.pdf'), await doc.save({ useObjectStreams: false }));
 }
 
+async function predefinedCMap(): Promise<void> {
+  // 埋め込まない日本語のフォントと、定義済みの CMap（UniJIS-UCS2-H）。古い PDF で見かける形
+  const doc = await PDFDocument.create({ updateMetadata: false });
+  const page = doc.addPage([595, 842]);
+  const font = doc.context.register(doc.context.obj({
+    Type: 'Font', Subtype: 'Type0', BaseFont: 'KozMinPr6N-Regular', Encoding: 'UniJIS-UCS2-H',
+    DescendantFonts: [doc.context.obj({
+      Type: 'Font', Subtype: 'CIDFontType0', BaseFont: 'KozMinPr6N-Regular',
+      CIDSystemInfo: { Registry: PDFString.of('Adobe'), Ordering: PDFString.of('Japan1'), Supplement: 6 },
+      FontDescriptor: doc.context.obj({
+        Type: 'FontDescriptor', FontName: 'KozMinPr6N-Regular', Flags: 4, Ascent: 880, Descent: -120,
+        FontBBox: [-200, -300, 1200, 1000], ItalicAngle: 0, CapHeight: 700, StemV: 80,
+      }),
+      DW: 1000,
+    })],
+  }));
+  page.node.setFontDictionary(PDFName.of('F1'), font);
+  // 「氏名：見本花子」と「住所：架空県」の 2 行（UTF-16BE）
+  const hex = (t: string) => Array.from(t, (c) => c.charCodeAt(0).toString(16).padStart(4, '0')).join('');
+  const content = `BT /F1 20 Tf 50 700 Td <${hex('氏名：見本花子')}> Tj 0 -40 Td <${hex('住所：架空県')}> Tj ET`;
+  page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(content)));
+  writeFileSync(join(dir, 'cmap.pdf'), await doc.save({ useObjectStreams: false }));
+}
+
 await jbig2();
+await predefinedCMap();
 await jpeg();
 await jpx();
 await cmyk();

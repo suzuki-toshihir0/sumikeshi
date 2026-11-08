@@ -4,7 +4,8 @@ import { PageNavigator } from './ui/page-navigator';
 import { Overlay } from './ui/overlay';
 import { SelectionManager } from './selection/selection-manager';
 import { RedactionStore } from './redaction/redaction-store';
-import { redactPdf, RedactionError } from './redaction/pdf-redactor';
+import { RedactionError } from './redaction/errors';
+import { runRedactionInWorker } from './redaction/redaction-runner';
 import { readFileAsArrayBuffer, downloadPdf } from './utils/file-io';
 
 class App {
@@ -175,9 +176,13 @@ class App {
       return;
     }
 
+    this.toolbar.setBusy(true);
     try {
-      this.redactedBytes = await redactPdf(
-        this.originalBytes,
+      // 墨消しは Web Worker で動かす（壊れた画像などで終わらなくなっても画面が固まらないように）。
+      // Worker に渡すと元の ArrayBuffer は使えなくなるので、写しを渡す
+      this.redactedBytes = await runRedactionInWorker(
+        () => new Worker(new URL('./redaction/redaction-worker.ts', import.meta.url), { type: 'module' }),
+        this.originalBytes.slice(0),
         this.store.getAllRects(),
       );
 
@@ -199,6 +204,8 @@ class App {
       } else {
         alert(`墨消し処理中にエラーが発生しました。今回選んだ範囲の墨消しは行っていません。\n${e.message}`);
       }
+    } finally {
+      this.toolbar.setBusy(false);
     }
   }
 
