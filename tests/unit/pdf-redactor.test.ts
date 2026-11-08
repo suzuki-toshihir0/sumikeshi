@@ -135,48 +135,30 @@ describe('redactPdf', () => {
     expect(redactedContent).toContain(toHexString('Another public line'));
   });
 
-  it('墨消し後のBT...ETブロックが丸ごと削除される', async () => {
+  it('墨消しした行の文字の符号が消え、空の文字列を描く命令も残らない', async () => {
     const originalBytes = await createTestPdf();
 
-    // 元のContentStreamにはBT...ETブロックが3つある（3行のテキスト）
-    const originalContent = await extractPageContentStream(originalBytes, 0);
-    const originalBtCount = (originalContent.match(/\bBT\b/g) ?? []).length;
-    expect(originalBtCount).toBe(3);
-
-    // "SECRET data" の領域を墨消し
     const redactionMap = new Map<number, { x: number; y: number; width: number; height: number }[]>();
     redactionMap.set(1, [{ x: 40, y: 690, width: 300, height: 30 }]);
 
     const result = await redactPdf(originalBytes, redactionMap);
     const redactedContent = await extractPageContentStream(result, 0);
 
-    // 墨消し後はBT...ETブロックが2つに減っている（"SECRET data"のブロックが丸ごと削除）
-    const redactedBtCount = (redactedContent.match(/\bBT\b/g) ?? []).length;
-    expect(redactedBtCount).toBe(2);
-
-    // 空の `() Tj` オペレーターが残存していないことを確認
+    // 消した文字の文字送りは TJ の数値で埋めるので、空の文字列は描かない
     expect(redactedContent).not.toContain('() Tj');
+    expect(redactedContent).not.toContain('<> Tj');
+    expect(redactedContent).not.toContain(toHexString('SECRET data'));
   });
 
-  it('部分的な墨消しではBT...ETブロックが保持される', async () => {
-    // 1つのBT...ETブロック内に2つのTjがあり、片方だけ墨消しする場合
+  it('部分的な墨消しでは、範囲の外の行が残る', async () => {
     const doc = await PDFDocument.create();
     const font = await doc.embedFont(StandardFonts.Helvetica);
     const page = doc.addPage([595, 842]);
     page.setFont(font);
-
-    // 同じBT...ETブロック内に2行描画されるPDFを作る
-    // pdf-libのdrawTextは各呼び出しで別のBT...ETを生成するため、
-    // 2行を1ブロック内に収める必要がある。
-    // ここでは別ブロック(各1つのTj)で代用し、片方のブロックだけ削除されることを確認
     page.drawText('Keep this', { x: 50, y: 750, size: 16, color: rgb(0, 0, 0) });
     page.drawText('Remove this', { x: 50, y: 700, size: 16, color: rgb(0, 0, 0) });
 
     const bytes = await doc.save();
-    const originalContent = await extractPageContentStream(bytes.buffer as ArrayBuffer, 0);
-    const originalBtCount = (originalContent.match(/\bBT\b/g) ?? []).length;
-    expect(originalBtCount).toBe(2);
-
     const redactionMap = new Map<number, { x: number; y: number; width: number; height: number }[]>();
     // "Remove this" だけ墨消し
     redactionMap.set(1, [{ x: 40, y: 690, width: 300, height: 30 }]);
@@ -184,9 +166,6 @@ describe('redactPdf', () => {
     const result = await redactPdf(bytes.buffer as ArrayBuffer, redactionMap);
     const redactedContent = await extractPageContentStream(result, 0);
 
-    // "Remove this" のブロックが削除され、"Keep this" のブロックは残る
-    const redactedBtCount = (redactedContent.match(/\bBT\b/g) ?? []).length;
-    expect(redactedBtCount).toBe(1);
     expect(redactedContent).toContain(toHexString('Keep this'));
     expect(redactedContent).not.toContain(toHexString('Remove this'));
   });
@@ -268,5 +247,6 @@ async function extractPageContentStream(
     }
   }
 
-  return streams.join('\n');
+  // 16 進の文字列は大文字にそろえる（書き出す側によって大文字・小文字が違う）
+  return streams.join('\n').replace(/<([0-9a-fA-F\s]*)>/g, (_, h: string) => `<${h.replace(/\s/g, '').toUpperCase()}>`);
 }
