@@ -35,6 +35,30 @@ async function jpeg(): Promise<void> {
   writeFileSync(join(dir, 'jpeg.pdf'), await doc.save({ useObjectStreams: false }));
 }
 
+async function jpx(): Promise<void> {
+  // JPEG 2000。色空間は画像の中にだけあり、辞書には書かない形
+  const doc = await PDFDocument.create({ updateMetadata: false });
+  const page = doc.addPage([595, 842]);
+  const image = doc.context.register(doc.context.stream(readFileSync(join(dir, 'scan.jp2')), {
+    Type: 'XObject', Subtype: 'Image', Width: 800, Height: 300, Filter: 'JPXDecode',
+  }));
+  page.node.setXObject(PDFName.of('Im0'), image);
+  const content = `q ${PLACE.width} 0 0 ${PLACE.height} ${PLACE.x} ${PLACE.y} cm /Im0 Do Q`;
+  page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(content)));
+  writeFileSync(join(dir, 'jpx.pdf'), await doc.save({ useObjectStreams: false }));
+}
+
+async function cmyk(): Promise<void> {
+  // CMYK の JPEG。pdf-lib は Adobe の反転した CMYK に Decode [1 0 1 0 1 0 1 0] を付ける
+  const doc = await PDFDocument.create({ updateMetadata: false });
+  const page = doc.addPage([595, 842]);
+  const img = await doc.embedJpg(new Uint8Array(readFileSync(join(dir, 'scan-cmyk.jpg'))));
+  page.drawImage(img, PLACE);
+  writeFileSync(join(dir, 'cmyk.pdf'), await doc.save({ useObjectStreams: false }));
+}
+
 await jbig2();
 await jpeg();
+await jpx();
+await cmyk();
 console.log('done');

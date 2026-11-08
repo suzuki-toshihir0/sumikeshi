@@ -123,7 +123,9 @@ async function applyImageFilter(
         throw new UnsupportedFilterError('透明度を中に持つ JPEG 2000 の画像（SMaskInData）は扱えない');
       }
       const { JpxImage } = await imageDecoders();
-      const out = asUint8(JpxImage.decode(data, { numComponents: p.ncomp ?? 0, isIndexedColormap: false, smaskInData: false }));
+      // 成分の数を 0 にすると RGBA で返るので、色空間が無いときは画像の中の成分の数を渡す
+      const ncompWanted = p.ncomp ?? JpxImage.parseImageProperties(data).componentsCount;
+      const out = asUint8(JpxImage.decode(data, { numComponents: ncompWanted, isIndexedColormap: false, smaskInData: false }));
       const ncomp = Math.round(out.length / (p.width * p.height));
       return { data: out, bpc: 8, ncomp, ncompFromData: p.ncomp === undefined ? ncomp : undefined };
     }

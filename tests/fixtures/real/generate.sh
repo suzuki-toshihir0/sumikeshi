@@ -35,3 +35,12 @@ if command -v google-chrome-stable >/dev/null; then
     --no-pdf-header-footer --print-to-pdf="$PWD/chrome.pdf" "file://$PWD/chrome.html" 2>/dev/null
   rm -rf "$PROFILE"
 fi
+
+# JPEG 2000（一部のスキャナーが使う）と、CMYK の JPEG（印刷用の PDF でよくある形）
+magick scan.png -colorspace Gray scan.jp2
+magick scan.png -colorspace CMYK -quality 90 scan-cmyk.jpg
+
+# 暗号化した PDF（パスワードなしで開けるが、権限だけ制限されている形）
+if command -v qpdf >/dev/null; then
+  qpdf --encrypt "" owner 256 --print=none -- jbig2.pdf encrypted.pdf
+fi
