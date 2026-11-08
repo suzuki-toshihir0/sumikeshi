@@ -541,6 +541,13 @@ export async function redactOperations(
   }
   // 閉じていない BDC が範囲にかかっていた場合も、文字の情報を消す
   for (const m of marked) if (m.touched) stripMarkedContentText(rc, m.op, resources);
+  // 差し替えた元の画像・フォームは、資源に名前が残っていると保存されてしまうので外す
+  const usedXObjects = new Set<string>();
+  for (const o of out) {
+    const n = o.operands[0];
+    if (o.op === 'Do' && n?.type === 'name') usedXObjects.add(n.value);
+  }
+  resources.pruneUnused('XObject', usedXObjects);
   return { ops: out, changed };
 }
 

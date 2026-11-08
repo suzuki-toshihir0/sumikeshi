@@ -50,6 +50,19 @@ export class ResourceEditor {
     return name;
   }
 
+  /**
+   * 中身で使われていない資源を外す（写しの上で。元の辞書は変えない）。
+   * 差し替えた元の画像やフォームが、名前だけ残って保存されるのを防ぐ。
+   */
+  pruneUnused(category: ResourceCategory, used: Set<string>): void {
+    const cat = this.categoryDict(category);
+    if (!cat) return;
+    const unused = cat.keys().map((k) => k.decodeText()).filter((n) => !used.has(n));
+    if (unused.length === 0) return;
+    const c = this.ensureCategory(category);
+    for (const n of unused) c.delete(PDFName.of(n));
+  }
+
   private ensureCategory(category: ResourceCategory): PDFDict {
     const existing = this.categoryCopies.get(category);
     if (existing) return existing;

@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
-  PDFDocument, PDFName, PDFString, PDFHexString, StandardFonts, rgb,
+  PDFDocument, PDFName, PDFString, PDFHexString, PDFRawStream, StandardFonts, rgb, decodePDFRawStream,
 } from 'pdf-lib';
 import { redactPdf } from '../../src/redaction/pdf-redactor';
 import {
@@ -17,6 +17,38 @@ import {
 
 const fixture = (name: string) =>
   new Uint8Array(readFileSync(fileURLToPath(new URL(`../fixtures/real/${name}`, import.meta.url))));
+
+/** 元の PDF の画像のストリーム（圧縮されたままの生データ）が、出力に 1 つも残っていないことを確かめる */
+async function expectOriginalImagesGone(before: Uint8Array, after: Uint8Array) {
+  const doc = await PDFDocument.load(before);
+  const out = Buffer.from(after);
+  let checked = 0;
+  for (const [, obj] of doc.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream)) continue;
+    if (obj.dict.get(PDFName.of('Subtype'))?.toString() !== '/Image') continue;
+    const raw = obj.getContents();
+    if (raw.length < 16) continue;
+    checked++;
+    expect(out.includes(Buffer.from(raw.subarray(0, Math.min(64, raw.length))))).toBe(false);
+  }
+  expect(checked).toBeGreaterThan(0);
+}
+
+/** 出力のすべてのストリームを展開しても、その文字列が見つからないことを確かめる */
+async function expectNoStreamContains(after: Uint8Array, needle: string) {
+  expect(Buffer.from(after).includes(Buffer.from(needle))).toBe(false);
+  const doc = await PDFDocument.load(after);
+  for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream)) continue;
+    let data: Uint8Array;
+    try {
+      data = decodePDFRawStream(obj).decode();
+    } catch {
+      continue;
+    }
+    expect(Buffer.from(data).includes(Buffer.from(needle)), `${ref} に ${needle} が残っている`).toBe(false);
+  }
+}
 
 async function redact(bytes: Uint8Array, rects: Box[], pageNo = 1): Promise<Uint8Array> {
   return redactPdf(bytes.slice().buffer as ArrayBuffer, new Map([[pageNo, rects]]));
@@ -90,8 +122,7 @@ describe('スキャン（画像）の PDF', () => {
     const rect = { x: 150, y: 550, width: 100, height: 50 };
     const after = await redact(before, [rect]);
     await expectImageRedacted(before, after, rect);
-    // 元の画像の生データが残っていない
-    expect(Buffer.from(after).includes(Buffer.from(px.subarray(0, 64)))).toBe(false);
+    await expectOriginalImagesGone(before, after);
   });
 
   it('JBIG2 のスキャン', async () => {
@@ -99,6 +130,7 @@ describe('スキャン（画像）の PDF', () => {
     const rect = { x: 148, y: 578, width: 70, height: 24 };
     const after = await redact(before, [rect]);
     await expectImageRedacted(before, after, rect);
+    await expectOriginalImagesGone(before, after);
   });
 
   it('CCITT G4 のスキャン', async () => {
@@ -106,6 +138,7 @@ describe('スキャン（画像）の PDF', () => {
     const rect = { x: 148, y: 118, width: 102, height: 34 };
     const after = await redact(before, [rect]);
     await expectImageRedacted(before, after, rect);
+    await expectOriginalImagesGone(before, after);
   });
 
   it('JPEG のスキャン', async () => {
@@ -113,6 +146,7 @@ describe('スキャン（画像）の PDF', () => {
     const rect = { x: 148, y: 578, width: 70, height: 24 };
     const after = await redact(before, [rect]);
     await expectImageRedacted(before, after, rect);
+    await expectOriginalImagesGone(before, after);
   });
 });
 
@@ -121,6 +155,7 @@ describe('文字の PDF', () => {
     const before = await rawPage('q 0.5 0 0 0.5 0 0 cm BT /F1 24 Tf 100 1400 Td (SECRET-CM) Tj ET Q BT /F1 12 Tf 50 750 Td (Public) Tj ET');
     const rects = [{ x: 45, y: 695, width: 120, height: 18 }];
     const after = await redact(before, rects);
+    await expectNoStreamContains(after, 'SECRET-CM');
     expect(await allText(after)).not.toContain('SECRET');
     await expectOutsideTextKept(before, after, rects);
   });
@@ -129,6 +164,7 @@ describe('文字の PDF', () => {
     const before = await rawPage('BT /F1 1 Tf 24 0 0 24 50 700 Tm (Taro SECRET-TM) Tj ET');
     const rects = [{ x: 104, y: 693, width: 146, height: 26 }];
     const after = await redact(before, rects);
+    await expectNoStreamContains(after, 'SECRET-TM');
     const text = await allText(after);
     expect(text).not.toMatch(/SECRET|TM/);
     expect(text).toContain('Taro');
@@ -138,6 +174,7 @@ describe('文字の PDF', () => {
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (Name of the tenant in this contract: ) Tj (SECRET-ADV) Tj ET');
     const rects = [{ x: 237, y: 695, width: 83, height: 16 }];
     const after = await redact(before, rects);
+    await expectNoStreamContains(after, 'SECRET-ADV');
     const text = await allText(after);
     expect(text).not.toContain('SECRET');
     expect(text).toContain('Name of the tenant in this contract:');
@@ -166,6 +203,7 @@ describe('文字の PDF', () => {
     const before = await rawPage('BT /F1 12 Tf 30 TL 50 700 Td (Public line) Tj T* (SECRET-TSTAR) Tj ET');
     const rects = [{ x: 45, y: 666, width: 120, height: 18 }];
     const after = await redact(before, rects);
+    await expectNoStreamContains(after, 'SECRET-TSTAR');
     const text = await allText(after);
     expect(text).not.toContain('SECRET');
     expect(text).toContain('Public line');
@@ -175,6 +213,7 @@ describe('文字の PDF', () => {
     const before = await rawPage('BT /F1 12 Tf 20 TL 50 700 Td (Line one) Tj (SECRET-QUOTE) \' 2 1 (SECRET-DQ) " ET');
     const rects = [{ x: 45, y: 655, width: 200, height: 30 }];
     const after = await redact(before, rects);
+    await expectNoStreamContains(after, 'SECRET-QUOTE');
     const text = await allText(after);
     expect(text).not.toContain('SECRET');
     expect(text).toContain('Line one');
@@ -190,6 +229,7 @@ describe('文字の PDF', () => {
     });
     const rects = [{ x: 45, y: 695, width: 120, height: 18 }];
     const after = await redact(before, rects);
+    await expectNoStreamContains(after, 'SECRET-XOBJ');
     expect(await documentText(after)).not.toContain('SECRET');
     expect(await allText(after)).toContain('Public');
     expect(Buffer.from(after).includes(Buffer.from('SECRET'))).toBe(false);
