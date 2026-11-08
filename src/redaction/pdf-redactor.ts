@@ -132,7 +132,8 @@ export async function redactPdf(
   try {
     doc = await PDFDocument.load(originalBytes, { updateMetadata: false });
   } catch (e) {
-    if (e instanceof EncryptedPDFError) {
+    // pdf-lib の読み込み方によってはクラスが別物になるので、名前と文言でも見る
+    if (e instanceof EncryptedPDFError || (e as Error).name === 'EncryptedPDFError' || /is encrypted/.test((e as Error).message)) {
       throw new RedactionError('暗号化された PDF は墨消しできません。パスワードを外してから読み込んでください。');
     }
     throw new RedactionError(`PDF を読めません（${(e as Error).message}）。`);
@@ -142,7 +143,13 @@ export async function redactPdf(
   }
 
   const ctx = doc.context;
-  const pages = doc.getPages();
+  let pages;
+  try {
+    pages = doc.getPages();
+  } catch (e) {
+    // 頁の木が循環しているなど、壊れた PDF
+    throw new RedactionError(`PDF の頁の作りが壊れていて読めません（${(e as Error).message}）。`);
+  }
   const stats: RedactionStats = { glyphsRemoved: 0, imagesRedacted: 0, pathsRemoved: 0, pathsTrimmed: 0, formsRewritten: 0 };
   const fontCache = new Map<PDFDict, Promise<FontModel>>();
   const cmapLoader = options.cmapLoader ?? defaultCMapLoader();
