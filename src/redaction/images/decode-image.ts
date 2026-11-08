@@ -114,7 +114,10 @@ async function applyImageFilter(
       const { JpegImage } = await imageDecoders();
       const colorTransform = getNum(ctx, step.params, 'ColorTransform');
       const jpeg = new JpegImage({ colorTransform: Number.isInteger(colorTransform) ? colorTransform : -1 });
-      jpeg.parse(data);
+      // 先頭にゴミがあるものは、最初の SOI（FF D8）まで読み飛ばす（pdf.js と同じ）
+      let start = 0;
+      while (start + 1 < data.length && !(data[start] === 0xff && data[start + 1] === 0xd8)) start++;
+      jpeg.parse(start > 0 && start + 1 < data.length ? data.subarray(start) : data);
       const out = jpeg.getData({ width: p.width, height: p.height, forceRGB: false, isSourcePDF: true });
       return { data: asUint8(out), bpc: 8, ncomp: jpeg.numComponents };
     }
@@ -125,8 +128,14 @@ async function applyImageFilter(
       const { JpxImage } = await imageDecoders();
       // 成分の数を 0 にすると RGBA で返るので、色空間が無いときは画像の中の成分の数を渡す
       const ncompWanted = p.ncomp ?? JpxImage.parseImageProperties(data).componentsCount;
-      const out = asUint8(JpxImage.decode(data, { numComponents: ncompWanted, isIndexedColormap: false, smaskInData: false }));
-      const ncomp = Math.round(out.length / (p.width * p.height));
+      const decoded = JpxImage.decode(data, { numComponents: ncompWanted, isIndexedColormap: false, smaskInData: false });
+      if (!decoded) throw new UnsupportedFilterError(`成分が ${ncompWanted} の JPEG 2000 の画像は読めない`);
+      const out = asUint8(decoded);
+      // 成分ごとに間引いた画像などで、復号した大きさが辞書の幅・高さと合わないことがある。合わなければ塗る位置が狂うので止める
+      if (out.length !== p.width * p.height * ncompWanted) {
+        throw new UnsupportedFilterError(`JPEG 2000 の画像の大きさが辞書（${p.width}x${p.height}）と合わない`);
+      }
+      const ncomp = ncompWanted;
       return { data: out, bpc: 8, ncomp, ncompFromData: p.ncomp === undefined ? ncomp : undefined };
     }
   }

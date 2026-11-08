@@ -192,6 +192,23 @@ describe('画像のいろいろな形', () => {
     await expectImageRedacted(before, after, rect);
   });
 
+  it('先頭にゴミのある JPEG（ビューアーは最初の SOI まで読み飛ばす）', async () => {
+    const jpeg = fixture('scan.jpg');
+    const junk = new Uint8Array([0x00, 0x0d, 0x0a, 0x20]);
+    const data = new Uint8Array(junk.length + jpeg.length);
+    data.set(junk);
+    data.set(jpeg, junk.length);
+    const before = await rawPage('q 400 0 0 150 50 500 cm /Im0 Do Q', (doc, page) => {
+      const img = doc.context.register(doc.context.stream(data, {
+        Type: 'XObject', Subtype: 'Image', Width: 800, Height: 300, ColorSpace: 'DeviceGray', BitsPerComponent: 8, Filter: 'DCTDecode',
+      }));
+      page.node.setXObject(PDFName.of('Im0'), img);
+    });
+    const rect = { x: 148, y: 578, width: 70, height: 24 };
+    const after = await redact(before, [rect]);
+    await expectImageRedacted(before, after, rect);
+  });
+
   it('画像マスク（ImageMask）で描いた文字の形', async () => {
     const w = 64, h = 16;
     const bits = new Uint8Array((w / 8) * h).map((_, i) => (i * 37) & 0xff);

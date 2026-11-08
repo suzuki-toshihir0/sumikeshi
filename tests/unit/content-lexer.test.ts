@@ -63,6 +63,12 @@ describe('parseContentStream', () => {
     expect(latin1(ops[0].inlineImage!.data)).toBe('00>');
   });
 
+  it('余計な ) や > は読み飛ばす（pdf.js と同じ扱い）', () => {
+    const ops = parseContentStream(enc('q ) 1 0 0 1 5 5 cm > Q'));
+    expect(ops.map((o) => o.op)).toEqual(['q', 'cm', 'Q']);
+    expect(ops[1].operands).toHaveLength(6);
+  });
+
   it('true / false / null を読む', () => {
     const ops = parseContentStream(enc('/X <</A true /B false /C null>> BDC'));
     const dict = ops[0].operands[1] as Extract<Operand, { type: 'dict' }>;

@@ -81,7 +81,9 @@ class Lexer {
         this.pos += 2;
         return { kind: 'dictEnd' };
       }
-      throw new ContentParseError(`予期しない '>'（位置 ${this.pos}）`);
+      // 余計な '>'。ビューアー（pdf.js）と同じく読み飛ばす
+      this.pos++;
+      return this.next();
     }
     if (c === 0x5b) {
       this.pos++;
@@ -98,7 +100,9 @@ class Lexer {
       return this.next();
     }
     if (c === 0x29) {
-      throw new ContentParseError(`予期しない ')'（位置 ${this.pos}）`);
+      // 余計な ')'。ビューアー（pdf.js）と同じく読み飛ばす
+      this.pos++;
+      return this.next();
     }
 
     const start = this.pos;
