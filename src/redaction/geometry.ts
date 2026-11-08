@@ -166,3 +166,94 @@ export function subtractRect(a: PdfRect, b: PdfRect): PdfRect[] {
 export function inflate(r: PdfRect, d: number): PdfRect {
   return { x: r.x - d, y: r.y - d, width: r.width + 2 * d, height: r.height + 2 * d };
 }
+
+/** 3 次ベジエ曲線を折れ線にする（端点を含まず、終点は含む） */
+export function flattenCubic(p0: Point, p1: Point, p2: Point, p3: Point): Point[] {
+  const len = Math.hypot(p1[0] - p0[0], p1[1] - p0[1]) + Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) + Math.hypot(p3[0] - p2[0], p3[1] - p2[1]);
+  const n = Math.max(4, Math.min(256, Math.ceil(len / 1)));
+  const out: Point[] = [];
+  for (let i = 1; i <= n; i++) {
+    const t = i / n;
+    const u = 1 - t;
+    out.push([
+      u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0],
+      u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1],
+    ]);
+  }
+  return out;
+}
+
+/** 多角形を、軸にそろった矩形の内側に切り取る（Sutherland–Hodgman。切り取る側は凸なので正しい） */
+export function clipPolygonToRect(poly: Point[], r: PdfRect): Point[] {
+  const edges: [(p: Point) => boolean, (a: Point, b: Point) => Point][] = [
+    [(p) => p[0] >= r.x, (a, b) => lerpX(a, b, r.x)],
+    [(p) => p[0] <= r.x + r.width, (a, b) => lerpX(a, b, r.x + r.width)],
+    [(p) => p[1] >= r.y, (a, b) => lerpY(a, b, r.y)],
+    [(p) => p[1] <= r.y + r.height, (a, b) => lerpY(a, b, r.y + r.height)],
+  ];
+  let out = poly;
+  for (const [insideFn, cut] of edges) {
+    if (out.length === 0) break;
+    const input = out;
+    out = [];
+    for (let i = 0; i < input.length; i++) {
+      const cur = input[i];
+      const prev = input[(i + input.length - 1) % input.length];
+      const ci = insideFn(cur);
+      const pi = insideFn(prev);
+      if (ci) {
+        if (!pi) out.push(cut(prev, cur));
+        out.push(cur);
+      } else if (pi) {
+        out.push(cut(prev, cur));
+      }
+    }
+  }
+  return out;
+}
+
+function lerpX(a: Point, b: Point, x: number): Point {
+  const t = (x - a[0]) / (b[0] - a[0]);
+  return [x, a[1] + (b[1] - a[1]) * t];
+}
+
+function lerpY(a: Point, b: Point, y: number): Point {
+  const t = (y - a[1]) / (b[1] - a[1]);
+  return [a[0] + (b[0] - a[0]) * t, y];
+}
+
+/** 多角形の面積（符号付き） */
+export function polygonArea(poly: Point[]): number {
+  let s = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const [x0, y0] = poly[i];
+    const [x1, y1] = poly[(i + 1) % poly.length];
+    s += x0 * y1 - x1 * y0;
+  }
+  return s / 2;
+}
+
+/**
+ * 多角形から矩形 r を抜いた残りを、重ならない多角形の集まりで返す。
+ * r の外側を、重ならない 4 つの帯（下・上・左・右）に分け、それぞれに切り取る。
+ */
+export function subtractRectFromPolygon(poly: Point[], r: PdfRect): Point[][] {
+  const b = boundsOf(poly);
+  const x0 = Math.min(b.x, r.x) - 1;
+  const y0 = Math.min(b.y, r.y) - 1;
+  const x1 = Math.max(b.x + b.width, r.x + r.width) + 1;
+  const y1 = Math.max(b.y + b.height, r.y + r.height) + 1;
+  const strips: PdfRect[] = [
+    { x: x0, y: y0, width: x1 - x0, height: r.y - y0 },
+    { x: x0, y: r.y + r.height, width: x1 - x0, height: y1 - (r.y + r.height) },
+    { x: x0, y: r.y, width: r.x - x0, height: r.height },
+    { x: r.x + r.width, y: r.y, width: x1 - (r.x + r.width), height: r.height },
+  ];
+  const out: Point[][] = [];
+  for (const s of strips) {
+    if (s.width <= 0 || s.height <= 0) continue;
+    const piece = clipPolygonToRect(poly, s);
+    if (piece.length >= 3 && Math.abs(polygonArea(piece)) > 1e-9) out.push(piece);
+  }
+  return out;
+}

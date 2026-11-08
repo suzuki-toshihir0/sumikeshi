@@ -15,7 +15,8 @@ import { parseContentStream } from './content/lexer';
 import { serializeOperations } from './content/writer';
 import {
   type Matrix, type Point, IDENTITY, multiply, apply, invert, transformBox, quadOverlapsRect,
-  boundsOf, rectsOverlap, inflate, clipSegmentToRect, subtractRect, maxScale,
+  boundsOf, rectsOverlap, inflate, clipSegmentToRect, subtractRect, maxScale, flattenCubic,
+  subtractRectFromPolygon,
 } from './geometry';
 import { createFontModel, UnsupportedFontError, type FontModel } from './fonts/font-model';
 import type { CMapLoader } from './fonts/cmap';
@@ -295,6 +296,10 @@ export async function redactOperations(
       const hits = rc.rects.filter((r) => rectsOverlap(bounds, r));
       if (hits.length === 0) {
         result.push(...sp.ops);
+        // s / b / b* は最後のサブパスを閉じる。塗りの命令を S / B / B* に変えるので、明示して閉じる
+        if (closesLast && sp === paths[paths.length - 1] && sp.ops[sp.ops.length - 1]?.op !== 'h' && !sp.rect) {
+          result.push({ op: 'h', operands: [] });
+        }
         continue;
       }
       modified = true;
@@ -319,25 +324,32 @@ export async function redactOperations(
         continue;
       }
 
-      // 直線だけの線（塗りなし）: 範囲の外の部分を残す
-      if (!fill && sp.straight) {
-        const segs = segmentsOf(sp);
+      // それ以外の形（曲線は折れ線にする）
+      const poly = subpathPolyline(sp, ctm);
+      if (fill) {
+        // 塗り: 多角形から範囲を抜いた残りを、重ならない多角形で描く
+        let pieces = [poly];
+        for (const r of hits) pieces = pieces.flatMap((pc) => subtractRectFromPolygon(pc, r));
+        for (const pc of pieces) {
+          result.push({ op: 'm', operands: toUser(pc[0]) });
+          for (const q of pc.slice(1)) result.push({ op: 'l', operands: toUser(q) });
+          result.push({ op: 'h', operands: [] });
+        }
+      } else {
+        // 線: 線分ごとに、範囲（線の太さの半分だけ広げる）の外の部分を残す
         const expanded = hits.map((r) => inflate(r, halfWidth));
-        for (const [a, b] of segs) {
-          const da = apply(ctm, a[0], a[1]);
-          const db = apply(ctm, b[0], b[1]);
+        const segs: [Point, Point][] = [];
+        for (let i = 0; i + 1 < poly.length; i++) segs.push([poly[i], poly[i + 1]]);
+        if (sp.closed && poly.length > 2) segs.push([poly[poly.length - 1], poly[0]]);
+        for (const [da, db] of segs) {
           for (const [t0, t1] of keptIntervals(da, db, expanded)) {
             const p0: Point = [da[0] + (db[0] - da[0]) * t0, da[1] + (db[1] - da[1]) * t0];
             const p1: Point = [da[0] + (db[0] - da[0]) * t1, da[1] + (db[1] - da[1]) * t1];
             result.push({ op: 'm', operands: toUser(p0) }, { op: 'l', operands: toUser(p1) });
           }
         }
-        rc.stats.pathsTrimmed++;
-        continue;
       }
-
-      // それ以外（曲線、塗りの多角形、文字をパスにしたものなど）: そのサブパスを消す
-      rc.stats.pathsRemoved++;
+      rc.stats.pathsTrimmed++;
     }
 
     if (!modified) return original();
@@ -574,13 +586,44 @@ function axisAlignedRect(sp: Subpath, ctm: Matrix): PdfRect | null {
   return r.width > 0 && r.height > 0 ? r : null;
 }
 
-/** 直線だけのサブパスの線分（閉じていれば最後に始点へ戻る線分を足す） */
-function segmentsOf(sp: Subpath): [Point, Point][] {
-  const pts = sp.points;
-  const segs: [Point, Point][] = [];
-  for (let i = 0; i + 1 < pts.length; i++) segs.push([pts[i], pts[i + 1]]);
-  if (sp.closed && pts.length > 1) segs.push([pts[pts.length - 1], pts[0]]);
-  return segs;
+/** サブパスを、頁の座標の折れ線にする（曲線は細かい直線に分ける） */
+function subpathPolyline(sp: Subpath, ctm: Matrix): Point[] {
+  if (sp.rect) {
+    const [x, y, w, h] = sp.rect;
+    return [apply(ctm, x, y), apply(ctm, x + w, y), apply(ctm, x + w, y + h), apply(ctm, x, y + h)];
+  }
+  const out: Point[] = [];
+  let cur: Point = [0, 0];
+  for (const o of sp.ops) {
+    const n = o.operands.map((v) => (v.type === 'number' ? v.value : 0));
+    const P = (i: number): Point => apply(ctm, n[i], n[i + 1]);
+    switch (o.op) {
+      case 'm':
+      case 'l':
+        cur = P(0);
+        out.push(cur);
+        break;
+      case 'c': {
+        const pts = flattenCubic(cur, P(0), P(2), P(4));
+        out.push(...pts);
+        cur = P(4);
+        break;
+      }
+      case 'v': {
+        const pts = flattenCubic(cur, cur, P(0), P(2));
+        out.push(...pts);
+        cur = P(2);
+        break;
+      }
+      case 'y': {
+        const pts = flattenCubic(cur, P(0), P(2), P(2));
+        out.push(...pts);
+        cur = P(2);
+        break;
+      }
+    }
+  }
+  return out;
 }
 
 /** 線分のうち、どの矩形にも入らない部分を [t0, t1] の並びで返す */

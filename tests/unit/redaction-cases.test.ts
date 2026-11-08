@@ -320,6 +320,53 @@ describe('文字のいろいろな形', () => {
   });
 });
 
+describe('図形', () => {
+  it('s（閉じて線を引く）: 範囲にかからない最後のサブパスも閉じたまま描かれる', async () => {
+    const before = await rawPage('0 0 0 RG 300 300 m 400 300 l 400 400 l 50 700 m 100 700 l 100 750 l s');
+    const rect = { x: 40, y: 690, width: 30, height: 30 };
+    const after = await redact(before, [rect]);
+    const segs = await extractPathSegments(after);
+    // 三角形 300,300 → 400,300 → 400,400 は開いたまま（s は最後のサブパスだけを閉じる）
+    const closing = segs.some(([[x0, y0], [x1, y1]]) => x0 === 400 && y0 === 400 && x1 === 300 && y1 === 300);
+    expect(closing).toBe(false);
+    // 最後のサブパス（範囲にかかる）は、範囲の外の部分が残り、閉じる辺（100,750 → 50,700）の外の部分もある
+    expect(segs.some((s) => segmentCrossesInterior(s, rect))).toBe(false);
+    expect(segs.some(([[x0, y0], [x1, y1]]) => x0 === 100 && y0 === 750 && x1 < 100 && y1 < 750)).toBe(true);
+  });
+
+  it('s: 範囲にかからない最後のサブパスは閉じる', async () => {
+    const before = await rawPage('0 0 0 RG 50 700 m 60 700 l 300 300 m 400 300 l 400 400 l s');
+    const rect = { x: 40, y: 690, width: 30, height: 30 };
+    const after = await redact(before, [rect]);
+    const segs = await extractPathSegments(after);
+    expect(segs.some(([[x0, y0], [x1, y1]]) => x0 === 400 && y0 === 400 && x1 === 300 && y1 === 300)).toBe(true);
+  });
+
+  it('範囲にかかる曲線の塗り（角の丸い枠など）は、範囲の外の部分が残る', async () => {
+    // 角の丸い大きな矩形（曲線を含む）
+    const before = await rawPage('0.8 g 100 500 m 400 500 l 400 600 l 410 610 410 620 400 620 c 100 620 l h f');
+    const rect = { x: 200, y: 550, width: 50, height: 30 };
+    const after = await redact(before, [rect]);
+    const segs = await extractPathSegments(after);
+    expect(segs.some((s) => segmentCrossesInterior(s, rect))).toBe(false);
+    // 左下の角（100,500）と、範囲の右の部分（400,500）は残る
+    const pts = segs.flatMap((s) => s);
+    expect(pts.some(([x, y]) => Math.abs(x - 100) < 0.01 && Math.abs(y - 500) < 0.01)).toBe(true);
+    expect(pts.some(([x, y]) => Math.abs(x - 400) < 0.01 && Math.abs(y - 500) < 0.01)).toBe(true);
+  });
+
+  it('文字をパスにしたもの: 範囲にかかる字形は、範囲の外の部分だけが残る', async () => {
+    // 1 つの字形（矩形でない多角形）が範囲の境目をまたぐ
+    const before = await rawPage('0 g 50 700 m 120 700 l 120 720 l 60 725 l h f');
+    const rect = { x: 80, y: 690, width: 60, height: 40 };
+    const after = await redact(before, [rect]);
+    const segs = await extractPathSegments(after);
+    expect(segs.some((s) => segmentCrossesInterior(s, rect))).toBe(false);
+    const xs = segs.flatMap((s) => [s[0][0], s[1][0]]);
+    expect(Math.min(...xs)).toBeCloseTo(50);
+  });
+});
+
 describe('安全に消せないときは止める', () => {
   it('幅の分からないフォントの文字が範囲にかかり得るなら、RedactionError で止める', async () => {
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (SECRET) Tj ET', (doc, page) => {
