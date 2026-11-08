@@ -185,6 +185,95 @@ export async function extractPathBoxes(bytes: Uint8Array, pageNo = 1): Promise<B
   return out;
 }
 
+export type Segment = [[number, number], [number, number]];
+
+/**
+ * 頁で描かれるパスを、線分（曲線は制御点を結んだ折れ線）に分けて返す。
+ * 塗りつぶしの黒い四角も含む。
+ */
+export async function extractPathSegments(bytes: Uint8Array, pageNo = 1): Promise<Segment[]> {
+  const doc = await open(bytes);
+  const page = await doc.getPage(pageNo);
+  const ops = await page.getOperatorList();
+  const out: Segment[] = [];
+  let ctm = [1, 0, 0, 1, 0, 0];
+  const stack: number[][] = [];
+  const T = (x: number, y: number): [number, number] => [ctm[0] * x + ctm[2] * y + ctm[4], ctm[1] * x + ctm[3] * y + ctm[5]];
+  for (let i = 0; i < ops.fnArray.length; i++) {
+    const fn = ops.fnArray[i];
+    const args = ops.argsArray[i];
+    if (fn === pdfjs.OPS.save) stack.push(ctm);
+    else if (fn === pdfjs.OPS.restore) ctm = stack.pop() ?? ctm;
+    else if (fn === pdfjs.OPS.transform) ctm = multiply(args as number[], ctm);
+    else if (fn === pdfjs.OPS.constructPath) {
+      const pathOps = args[0] as number[];
+      const coords = Array.from(args[1] as number[]);
+      let k = 0;
+      let cur: [number, number] = [0, 0];
+      let start: [number, number] = [0, 0];
+      for (const op of pathOps) {
+        if (op === pdfjs.OPS.moveTo) {
+          cur = T(coords[k], coords[k + 1]);
+          start = cur;
+          k += 2;
+        } else if (op === pdfjs.OPS.lineTo) {
+          const p = T(coords[k], coords[k + 1]);
+          out.push([cur, p]);
+          cur = p;
+          k += 2;
+        } else if (op === pdfjs.OPS.curveTo) {
+          const pts = [T(coords[k], coords[k + 1]), T(coords[k + 2], coords[k + 3]), T(coords[k + 4], coords[k + 5])];
+          for (const p of pts) {
+            out.push([cur, p]);
+            cur = p;
+          }
+          k += 6;
+        } else if (op === pdfjs.OPS.curveTo2 || op === pdfjs.OPS.curveTo3) {
+          const pts = [T(coords[k], coords[k + 1]), T(coords[k + 2], coords[k + 3])];
+          for (const p of pts) {
+            out.push([cur, p]);
+            cur = p;
+          }
+          k += 4;
+        } else if (op === pdfjs.OPS.closePath) {
+          out.push([cur, start]);
+          cur = start;
+        } else if (op === pdfjs.OPS.rectangle) {
+          const [x, y, w, h] = coords.slice(k, k + 4);
+          const c = [T(x, y), T(x + w, y), T(x + w, y + h), T(x, y + h)];
+          for (let j = 0; j < 4; j++) out.push([c[j], c[(j + 1) % 4]]);
+          cur = c[0];
+          start = c[0];
+          k += 4;
+        }
+      }
+    }
+  }
+  await doc.destroy();
+  return out;
+}
+
+/** 線分が矩形の内側（境界を除く）を通るか */
+export function segmentCrossesInterior(seg: Segment, r: Box): boolean {
+  const [[x0, y0], [x1, y1]] = seg;
+  let t0 = 0;
+  let t1 = 1;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const checks: [number, number][] = [[-dx, x0 - r.x], [dx, r.x + r.width - x0], [-dy, y0 - r.y], [dy, r.y + r.height - y0]];
+  for (const [p, q] of checks) {
+    if (p === 0) {
+      if (q <= 0) return false;
+      continue;
+    }
+    const t = q / p;
+    if (p < 0) t0 = Math.max(t0, t);
+    else t1 = Math.min(t1, t);
+    if (t0 >= t1) return false;
+  }
+  return t1 - t0 > 1e-9;
+}
+
 /** 頁の注釈の一覧（種類と中身） */
 export async function extractAnnotations(bytes: Uint8Array, pageNo = 1) {
   const doc = await open(bytes);

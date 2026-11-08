@@ -10,7 +10,8 @@ import {
 } from 'pdf-lib';
 import { redactPdf } from '../../src/redaction/pdf-redactor';
 import {
-  allText, extractText, extractImages, extractPathBoxes, extractAnnotations, extractDocumentInfo,
+  allText, extractText, extractImages, extractPathBoxes, extractPathSegments, segmentCrossesInterior,
+  extractAnnotations, extractDocumentInfo,
   pixelCenterOnPage, inside, overlaps, documentText, type Box,
 } from './helpers/pdf-oracle';
 
@@ -205,22 +206,34 @@ describe('文字の PDF', () => {
     const before = await rawPage('0 0 0 rg 50 700 m 60 712 l 70 700 l h f 200 700 m 210 712 l 220 700 l h f');
     const rect = { x: 45, y: 695, width: 30, height: 22 };
     const after = await redact(before, [rect]);
-    const boxes = await extractPathBoxes(after);
-    // 塗りつぶしの黒い四角は描き足すので、それ以外のパスが範囲にかからないことを見る
-    const others = boxes.filter((b) => !(Math.abs(b.x - rect.x) < 0.01 && Math.abs(b.width - rect.width) < 0.01));
-    expect(others.some((b) => overlaps(b, rect))).toBe(false);
+    const segs = await extractPathSegments(after);
+    // 黒い四角の辺は範囲の境界の上なので、内側を通る線分は無いはず
+    expect(segs.some((s) => segmentCrossesInterior(s, rect))).toBe(false);
     // 範囲の外の三角形は残る
-    expect(others.some((b) => b.x >= 199 && b.x <= 201)).toBe(true);
+    expect(segs.some((s) => s[0][0] >= 199 && s[0][0] <= 221 && s[0][1] >= 699)).toBe(true);
   });
 
   it('範囲を横切る表の罫線は、範囲の外の部分が残る', async () => {
     const before = await rawPage('1 w 0 0 0 RG 50 700 m 500 700 l S');
     const rect = { x: 200, y: 690, width: 50, height: 20 };
     const after = await redact(before, [rect]);
-    const boxes = (await extractPathBoxes(after)).filter((b) => !(Math.abs(b.x - rect.x) < 0.01 && Math.abs(b.width - rect.width) < 0.01));
-    expect(boxes.some((b) => b.x <= 51 && b.x + b.width >= 190)).toBe(true);
-    expect(boxes.some((b) => b.x <= 260 && b.x + b.width >= 490)).toBe(true);
-    expect(boxes.some((b) => overlaps(b, { x: 201, y: 690, width: 48, height: 20 }))).toBe(false);
+    const segs = await extractPathSegments(after);
+    expect(segs.some((s) => segmentCrossesInterior(s, rect))).toBe(false);
+    const horizontal = segs.filter((s) => s[0][1] === 700 && s[1][1] === 700);
+    expect(horizontal.some((s) => Math.min(s[0][0], s[1][0]) === 50 && Math.max(s[0][0], s[1][0]) >= 195)).toBe(true);
+    expect(horizontal.some((s) => Math.max(s[0][0], s[1][0]) === 500 && Math.min(s[0][0], s[1][0]) <= 255)).toBe(true);
+  });
+
+  it('範囲にかかる背景の矩形の塗りは、範囲を抜いた形で残る', async () => {
+    const before = await rawPage('0.9 g 40 680 300 60 re f');
+    const rect = { x: 100, y: 690, width: 50, height: 20 };
+    const after = await redact(before, [rect]);
+    const segs = await extractPathSegments(after);
+    expect(segs.some((s) => segmentCrossesInterior(s, rect))).toBe(false);
+    // 元の矩形の四隅は残る
+    const xs = segs.flatMap((s) => [s[0][0], s[1][0]]);
+    expect(xs).toContain(40);
+    expect(xs).toContain(340);
   });
 });
 
@@ -303,8 +316,9 @@ describe('実在の作り方の PDF', () => {
     const rects = [{ x: 140, y: 655, width: 63, height: 25 }];
     const after = await redact(before, rects);
     const text = await allText(after);
-    expect(text).not.toContain('見本');
     expect(text).not.toContain('花子');
+    // 「見本」は住所（架空県見本市）にもあるので、氏名の直後に無いことを見る
+    expect(text).not.toMatch(/氏名[:：]?\s*見本/);
     expect(text).toContain('賃借人氏名');
     expect(text).toContain('生年月日');
     expect(text).toContain('架空県見本市');
