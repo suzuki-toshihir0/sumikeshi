@@ -18,7 +18,7 @@
 - `src/` — ソースコード（Viteのroot）
   - `viewer/` — PDF.jsによるPDF表示・テキストレイヤー
   - `selection/` — テキスト選択・矩形選択モード
-  - `redaction/` — 墨消し処理（ContentStream操作、メタデータクリア）
+  - `redaction/` — 墨消し処理（下の「墨消し処理フロー」）
   - `ui/` — ツールバー、ページナビ、オーバーレイ
   - `utils/` — 座標変換、ファイルI/O
 - `tests/unit/` — Vitestによる単体テスト
@@ -36,18 +36,51 @@
 
 ### 設計上の重要な制約
 
-- **ネットワーク完全遮断**: CSPの `connect-src 'none'` により外部通信を一切行わない。すべての処理はブラウザのサンドボックス内で完結する。
+- **ネットワーク完全遮断**: CSPの `connect-src 'self'` により外部通信を一切行わない（同じサイトの `cmaps/` だけを読む）。すべての処理はブラウザのサンドボックス内で完結する。
+- **WebAssembly**: JPEG 2000 の復号器（pdf.js の OpenJPEG）のため、CSP の `script-src` に `'wasm-unsafe-eval'` を入れている。
 - **本番依存は2つのみ**: `pdfjs-dist` と `pdf-lib`。フレームワークは使わない（Vanilla TS）。
 - **ArrayBufferのコピー**: pdfjs-distはWorkerにArrayBufferをtransferしてdetachedにするため、pdf-lib用に `.slice(0)` でコピーを保持する必要がある（`main.ts` の `loadFile`）。
 
-### 墨消し処理フロー（pdf-redactor.ts）
+### 墨消し処理フロー（src/redaction/）
 
-1. pdf-libで `PDFDocument.load()` でPDFを読み込む
-2. 各ページのContentStreamをパースし、BT...ETブロック内のテキスト描画オペレーター（Tj, TJ等）を特定
-3. 墨消し対象領域と重なるテキストオペレーターを空文字列 `() Tj` に置換
-4. 墨消し領域に黒塗り矩形を `page.drawRectangle()` で描画
-5. メタデータを全クリア
-6. `PDFDocument.save()` で出力
+見た目を黒い四角で隠すだけでは、下の文字・画像はデータとして残る（文字のコピー、画像の取り出し、OCR で読める）。範囲にかかるデータそのものを消す。
+
+1. `pdf-redactor.ts`: pdf-lib で読み込み、墨消しする頁ごとに以下を行い、最後に `sanitize.ts` で文書全体を掃除して保存する
+2. `content/lexer.ts` `content/writer.ts`: ContentStream を PDF の構文どおりに読み書きする（文字列・辞書・配列・インライン画像）
+3. `content-redactor.ts`: 命令を 1 つずつ追い、CTM（`cm`）・テキスト行列（`Tm` `Td` `T*`）・文字の状態（`Tf` `Tc` `Tw` `Tz` `Ts`）を持つ
+   - 文字: `fonts/font-model.ts` の幅と高さから 1 文字ずつ頁の上の箱を求め、範囲にかかる符号を消す。消した文字の文字送りは `TJ` の数値で埋め、後ろの文字の位置を変えない。囲む BDC の ActualText / Alt も消す
+   - パス: 直線の線は範囲の外を残し、軸にそろった矩形の塗りは範囲を抜く。それ以外のかかるサブパスは消す。切り抜き（`W n`）は形を変えない
+   - Form XObject: 中身を同じ処理にかけ、変わったら写しを作って差し替える
+   - 画像（`Do` とインライン画像）: `images/` で復号し、範囲にかかる画素を一色で塗って Flate で圧縮し直す。SMask・Mask も塗る
+   - 差し替えた元の画像・フォームが資源に残らないよう、使われなくなった XObject を資源から外す（`resources.ts`）
+4. `annotations.ts`: 範囲にかかる注釈（フォームの欄、リンク、ポップアップを含む）を消し、フォームの欄の木からも外す
+5. 範囲に黒い四角を描く（元の中身は q/Q の釣り合いを取って囲む）
+6. `sanitize.ts`: Info・XMP・ID・構造の木・しおり・添付ファイル・JavaScript・縮小画像（Thumb）を消し、どこからも参照されないオブジェクトを消す
+
+#### 安全側に倒すところ（`errors.ts` の `RedactionError`）
+
+情報が残るおそれのある PDF は出力しない。次の場合は処理を止め、理由を利用者に見せる。
+
+- 幅の分からないフォント（`Widths` の無い、標準 14 フォントでないもの）の文字が、範囲にかかり得る（行の先まで伸ばした帯が範囲にかかる）
+- 範囲にかかる画像を読めない（未対応のフィルター、壊れたデータ、`SMaskInData` の JPEG 2000 など）
+- 暗号化された PDF
+
+#### 対応しているもの
+
+- フォント: 標準 14 フォント（AFM の幅。別名も）、`Widths` のある単純フォント、Type3、Type0（Identity-H/V、定義済みの CMap は pdf.js の `cmaps/*.bcmap` を読む、埋め込みの CMap）、縦書き（`W2` `DW2`）
+- 画像: Flate・LZW（予測子を含む）・ASCIIHex・ASCII85・RunLength・DCT（JPEG）・JPX（JPEG 2000）・JBIG2・CCITTFax。色空間は Device*、Cal*、ICCBased、Lab、Indexed、Separation、DeviceN、画像マスク
+- 復号器: JBIG2・JPEG・JPEG 2000 は `pdfjs-dist/image_decoders`（使うときだけ読み込む）。CCITT と CMap の読み込み、文字コードの表は pdf.js から `vendor/` に移植した（Apache-2.0）
+
+#### 扱わないもの（既知の制約）
+
+- 切り抜きのパス（`W n`）の形、タイリングパターンの中身、ExtGState の SMask（ソフトマスクの Form）、Type3 の字形の手続き、注釈の外観の中身（範囲にかかる注釈は丸ごと消す）
+- 埋め込みフォントの字形のデータ（消した文字の字形がフォントに残る。どの文字が使われていたかは分かるが、並びや位置は分からない）
+
+#### 試験
+
+- `tests/unit/redaction-leaks.test.ts` `redaction-cases.test.ts`: 墨消し後の PDF を pdf.js（`tests/unit/helpers/pdf-oracle.ts`）で読み直し、範囲の文字・画素・パス・注釈・メタデータが残らないことを確かめる。展開したすべてのストリームに秘密の文字列が無いことも見る
+- 素材は `tests/fixtures/real/`（中身はすべて架空）。作り方は `generate.sh` と `build-pdfs.ts`
+- `tests/e2e/redaction.spec.ts`: ブラウザで範囲を選んで墨消しし、ダウンロードした PDF を確かめる
 
 ### E2Eテストの注意事項
 

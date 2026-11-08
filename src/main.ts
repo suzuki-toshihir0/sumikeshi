@@ -4,7 +4,7 @@ import { PageNavigator } from './ui/page-navigator';
 import { Overlay } from './ui/overlay';
 import { SelectionManager } from './selection/selection-manager';
 import { RedactionStore } from './redaction/redaction-store';
-import { redactPdf } from './redaction/pdf-redactor';
+import { redactPdf, RedactionError } from './redaction/pdf-redactor';
 import { readFileAsArrayBuffer, downloadPdf } from './utils/file-io';
 
 class App {
@@ -193,7 +193,12 @@ class App {
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       console.error('墨消し処理エラー:', e.message, e.stack);
-      alert(`墨消し処理中にエラーが発生しました。\n${e.message}`);
+      if (err instanceof RedactionError) {
+        // 情報が残るおそれのある PDF は作らない。理由をそのまま伝える
+        alert(`この PDF は安全に墨消しできないため、今回選んだ範囲の墨消しは行っていません。\n\n${e.message}`);
+      } else {
+        alert(`墨消し処理中にエラーが発生しました。今回選んだ範囲の墨消しは行っていません。\n${e.message}`);
+      }
     }
   }
 
