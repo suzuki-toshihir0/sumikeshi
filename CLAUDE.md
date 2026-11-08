@@ -45,6 +45,7 @@
 
 見た目を黒い四角で隠すだけでは、下の文字・画像はデータとして残る（文字のコピー、画像の取り出し、OCR で読める）。範囲にかかるデータそのものを消す。
 
+0. `main.ts` → `redaction-runner.ts` → `redaction-worker.ts`: 墨消しは Web Worker で動かす。壊れた画像で復号器が終わらなくなっても画面が固まらないよう、120 秒で終わらなければ Worker を止めて `RedactionError` にする（pdf.js の JBIG2 の復号器が、特殊な JBIG2 で無限に回る例がある）
 1. `pdf-redactor.ts`: pdf-lib で読み込み、墨消しする頁ごとに以下を行い、最後に `sanitize.ts` で文書全体を掃除して保存する
 2. `content/lexer.ts` `content/writer.ts`: ContentStream を PDF の構文どおりに読み書きする（文字列・辞書・配列・インライン画像）
 3. `content-redactor.ts`: 命令を 1 つずつ追い、CTM（`cm`）・テキスト行列（`Tm` `Td` `T*`）・文字の状態（`Tf` `Tc` `Tw` `Tz` `Ts`）を持つ
@@ -69,7 +70,7 @@
 
 - フォント: 標準 14 フォント（AFM の幅。別名も）、`Widths` のある単純フォント、Type3、Type0（Identity-H/V、定義済みの CMap は pdf.js の `cmaps/*.bcmap` を読む、埋め込みの CMap）、縦書き（`W2` `DW2`）
 - 画像: Flate・LZW（予測子を含む）・ASCIIHex・ASCII85・RunLength・DCT（JPEG）・JPX（JPEG 2000）・JBIG2・CCITTFax。色空間は Device*、Cal*、ICCBased、Lab、Indexed、Separation、DeviceN、画像マスク
-- 復号器: JBIG2・JPEG・JPEG 2000 は `pdfjs-dist/image_decoders`（使うときだけ読み込む）。CCITT と CMap の読み込み、文字コードの表は pdf.js から `vendor/` に移植した（Apache-2.0）
+- 復号器: JBIG2・JPEG・JPEG 2000 は `pdfjs-dist/image_decoders`（使うときだけ読み込む。Worker は ES モジュールで出す設定が要る: `vite.config.ts` の `worker.format`）。CCITT と CMap の読み込み、文字コードの表は pdf.js から `vendor/` に移植した（Apache-2.0）
 
 #### 扱わないもの（既知の制約）
 
