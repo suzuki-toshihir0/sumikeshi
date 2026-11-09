@@ -224,7 +224,10 @@ export async function redactPdf(
     page.set(PDFName.of('Contents'), ctx.register(ctx.flateStream(serializeOperations(newOps))));
     if (resources.dict) page.set(PDFName.of('Resources'), resources.dict);
 
-    for (const a of removeOverlappingAnnotations(ctx, page, rects)) removedWidgets.add(a);
+    for (const a of removeOverlappingAnnotations(ctx, page, rects)) {
+      removedWidgets.add(a);
+      stats.annotationsRemoved = (stats.annotationsRemoved ?? 0) + 1;
+    }
   }
 
   if (removedWidgets.size > 0) pruneFormFields(ctx, doc.catalog, removedWidgets);

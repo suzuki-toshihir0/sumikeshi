@@ -32,6 +32,8 @@ export interface RedactionStats {
   glyphsScrubbed?: number;
   /** 字形を書き換えられず、フォントのデータごと外したフォントの数（見た目が変わりうる） */
   fontsUnembedded?: number;
+  /** 範囲にかかって消した注釈の数 */
+  annotationsRemoved?: number;
   imagesRedacted: number;
   pathsRemoved: number;
   pathsTrimmed: number;
