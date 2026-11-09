@@ -275,6 +275,9 @@ html, body {
   white-space: pre;
   color: transparent;
   pointer-events: none;
+  /* pdf.js は span を横に伸縮（scaleX）して PDF の文字列の幅に合わせる。起点を左上にしないと、
+     span が左右にずれ、文字選択の範囲が実際の字からずれる（pdfjs-dist/web/pdf_viewer.css と同じ） */
+  transform-origin: 0% 0%;
 }
 
 #text-layer.selecting-text span {

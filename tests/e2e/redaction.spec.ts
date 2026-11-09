@@ -174,4 +174,19 @@ test.describe('ブラウザでの墨消し', () => {
     await waitForRender(page);
     expect(await page.locator('#viewer-container').evaluate((el) => el.scrollTop)).toBe(0);
   });
+
+  test('テキストレイヤーの文字の位置が、PDF の文字の位置と合っている（文字選択の範囲がずれない）', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('cmap.pdf'));
+    await waitForRender(page);
+    const canvas = (await page.locator('#pdf-canvas').boundingBox())!;
+    const scale = canvas.width / 595;
+    // 「氏名：見本花子」は x=50 から 20pt の字が 7 つ（幅 140pt）
+    const span = page.locator('#text-layer span', { hasText: '氏名' }).first();
+    const box = (await span.boundingBox())!;
+    const left = (box.x - canvas.x) / scale;
+    const width = box.width / scale;
+    expect(Math.abs(left - 50)).toBeLessThan(1);
+    expect(Math.abs(width - 140)).toBeLessThan(2);
+  });
 });
