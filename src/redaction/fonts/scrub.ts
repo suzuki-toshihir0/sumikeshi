@@ -136,6 +136,21 @@ function cleanDescriptor(descriptor: PDFDict | undefined): void {
   descriptor?.delete(PDFName.of('CIDSet'));
 }
 
+/**
+ * TrueType から字形を消して入れ直す。書き換えられない（壊れている、コレクションなど）ときは、
+ * フォントのデータごと外す（ビューアーは代わりのフォントで描く）
+ */
+function scrubFontFile2(ctx: PDFContext, descriptor: PDFDict, bytes: Uint8Array, dropGids: Set<number>, stats: FontScrubStats): void {
+  try {
+    const r = scrubTrueType(bytes, dropGids);
+    replaceFontFile2(ctx, descriptor, r.font);
+    stats.glyphsScrubbed += r.dropped.size;
+  } catch {
+    descriptor.delete(PDFName.of('FontFile2'));
+    stats.fontsUnembedded++;
+  }
+}
+
 /** 書き換えた TrueType を FontFile2 に入れ直す */
 function replaceFontFile2(ctx: PDFContext, descriptor: PDFDict, bytes: Uint8Array): void {
   const s = ctx.flateStream(bytes);
@@ -261,12 +276,14 @@ function scrubSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Se
         descriptor.delete(PDFName.of('FontFile2'));
         stats.fontsUnembedded++;
       } else if (dropGids.size > 0) {
-        const r = scrubTrueType(tt.bytes, dropGids);
-        replaceFontFile2(ctx, descriptor, r.font);
-        stats.glyphsScrubbed += r.dropped.size;
+        scrubFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
       }
     } else {
       unembed(ctx, descriptor, stats);
+      if (descriptor?.has(PDFName.of('FontFile2'))) {
+        descriptor.delete(PDFName.of('FontFile2'));
+        stats.fontsUnembedded++;
+      }
     }
   }
   zeroWidths(ctx, font, drop);
@@ -353,13 +370,14 @@ async function scrubComposite(
       }
       const usedGids = new Set([...usedCids].map(toGid));
       const dropGids = new Set([...dropCids].map(toGid).filter((g) => !usedGids.has(g)));
-      if (dropGids.size > 0) {
-        const r = scrubTrueType(tt.bytes, dropGids);
-        replaceFontFile2(ctx, descriptor, r.font);
-        stats.glyphsScrubbed += r.dropped.size;
-      }
+      if (dropGids.size > 0) scrubFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
     } else {
       unembed(ctx, descriptor, stats);
+      // 読めない FontFile2 も外す
+      if (descriptor?.has(PDFName.of('FontFile2')) && dropCids.size > 0) {
+        descriptor.delete(PDFName.of('FontFile2'));
+        stats.fontsUnembedded++;
+      }
     }
   } else if (dropCids.size > 0) {
     unembed(ctx, descriptor, stats);

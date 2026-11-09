@@ -629,6 +629,36 @@ describe('フォントに残る字形', () => {
     expect((await allText(after)).replace(/\s/g, '')).toBe('AB');
   });
 
+  it('壊れた TrueType は書き換えず、消した文字がもう使われなければ、フォントのデータごと外す', async () => {
+    const broken = new Uint8Array(64);
+    broken.set([0, 1, 0, 0, 0, 1], 0); // 表が 1 つ
+    broken.set([0x67, 0x6c, 0x79, 0x66, 0, 0, 0, 0, 0, 0, 0x10, 0, 0, 0, 0x10, 0], 12); // glyf がファイルの外を指す
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <00010002> Tj ET BT /F1 12 Tf 50 600 Td <00030004> Tj ET', (doc, page) => {
+      const fontFile = doc.context.register(doc.context.flateStream(broken));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type0', BaseFont: 'Broken', Encoding: 'Identity-H',
+        DescendantFonts: [doc.context.obj({
+          Type: 'Font', Subtype: 'CIDFontType2', BaseFont: 'Broken', CIDToGIDMap: 'Identity',
+          CIDSystemInfo: { Registry: PDFString.of('Adobe'), Ordering: PDFString.of('Identity'), Supplement: 0 },
+          FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'Broken', Flags: 4, Ascent: 800, Descent: -200, FontBBox: [0, -200, 600, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile2: fontFile }),
+          DW: 600,
+        })],
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    let stats: { fontsUnembedded?: number } = {};
+    const after = await redactPdf(before.slice().buffer as ArrayBuffer, new Map([[1, [{ x: 45, y: 595, width: 30, height: 15 }]]]), {
+      onStats: (s) => { stats = s; },
+    });
+    expect(stats.fontsUnembedded).toBe(1);
+    const doc = await PDFDocument.load(after);
+    let fontFiles = 0;
+    for (const [, o] of doc.context.enumerateIndirectObjects()) {
+      if (o instanceof PDFRawStream && o.dict.has(PDFName.of('Length1'))) fontFiles++;
+    }
+    expect(fontFiles).toBe(0);
+  });
+
   it('書き換えられない形式のフォント（CFF など）は、消した文字がもう使われなければ、フォントのデータごと外す', async () => {
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (ab) Tj ET BT /F1 12 Tf 50 600 Td (cd) Tj ET', (doc, page) => {
       const ff3 = doc.context.register(doc.context.stream('SECRET-CFF-PROGRAM', { Subtype: 'Type1C' }));
