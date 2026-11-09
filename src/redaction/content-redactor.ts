@@ -20,7 +20,7 @@ import {
 } from './geometry';
 import { createFontModel, UnsupportedFontError, type FontModel } from './fonts/font-model';
 import type { CMapLoader } from './fonts/cmap';
-import { ResourceEditor } from './resources';
+import { ResourceEditor, shallowCopy } from './resources';
 import { get, getArray, getName, numbersOf, resolve, streamBytes } from './pdf-objects';
 import { RedactionError } from './errors';
 import { redactImageXObject, redactInlineImage } from './images/redact-image';
@@ -82,9 +82,17 @@ interface MarkedContent {
   touched: boolean;
 }
 
+/** 中身が資源の中で使っている名前 */
+export interface UsedNames {
+  XObject: Set<string>;
+  Properties: Set<string>;
+}
+
 export interface ContentResult {
   ops: Operation[];
   changed: boolean;
+  /** 書き換えた後の中身が使う名前（資源を持たない子の Form が親の資源から使う名前を含む） */
+  used: UsedNames;
 }
 
 /**
@@ -110,6 +118,8 @@ export async function redactOperations(
   let current: Subpath | null = null;
   let clipOp: Operation | null = null;
   const marked: MarkedContent[] = [];
+  /** 資源を持たない子の Form が、この資源から使っている名前 */
+  const inheritedUse: UsedNames = { XObject: new Set(), Properties: new Set() };
 
   const markTouched = () => {
     for (const m of marked) m.touched = true;
@@ -525,7 +535,7 @@ export async function redactOperations(
           out.push(o);
           break;
         }
-        const replaced = await handleXObject(rc, n.value, resources, gs);
+        const replaced = await handleXObject(rc, n.value, resources, gs, inheritedUse);
         if (replaced) {
           changed = true;
           markTouched();
@@ -553,14 +563,47 @@ export async function redactOperations(
   }
   // 閉じていない BDC が範囲にかかっていた場合も、文字の情報を消す
   for (const m of marked) if (m.touched) stripMarkedContentText(rc, m.op, resources);
-  // 差し替えた元の画像・フォームは、資源に名前が残っていると保存されてしまうので外す
-  const usedXObjects = new Set<string>();
+  // 差し替えた元の画像・フォーム・属性は、資源に名前が残っていると保存されてしまうので外す
+  const used: UsedNames = { XObject: new Set(inheritedUse.XObject), Properties: new Set(inheritedUse.Properties) };
   for (const o of out) {
-    const n = o.operands[0];
-    if (o.op === 'Do' && n?.type === 'name') usedXObjects.add(n.value);
+    const n0 = o.operands[0];
+    const n1 = o.operands[1];
+    if (o.op === 'Do' && n0?.type === 'name') used.XObject.add(n0.value);
+    if ((o.op === 'BDC' || o.op === 'DP') && n1?.type === 'name') used.Properties.add(n1.value);
   }
-  resources.pruneUnused('XObject', usedXObjects);
-  return { ops: out, changed };
+  for (const n of namesUsedByType3WithoutResources(rc, resources)) used.XObject.add(n);
+  resources.pruneUnused('XObject', used.XObject);
+  resources.pruneUnused('Properties', used.Properties);
+  return { ops: out, changed, used };
+}
+
+/**
+ * Resources を持たない Type3 フォントの字形の手続きは、呼び出し元の資源を使う。
+ * そこで Do している名前を集める（資源から外さないため）。
+ */
+function namesUsedByType3WithoutResources(rc: RedactionContext, resources: ResourceEditor): Set<string> {
+  const out = new Set<string>();
+  const fonts = resources.categoryDict('Font');
+  if (!fonts) return out;
+  for (const [, v] of fonts.entries()) {
+    const f = resolve(rc.ctx, v);
+    if (!(f instanceof PDFDict) || getName(rc.ctx, f, 'Subtype') !== 'Type3' || f.has(PDFName.of('Resources'))) continue;
+    const procs = get(rc.ctx, f, 'CharProcs');
+    if (!(procs instanceof PDFDict)) continue;
+    for (const [, p] of procs.entries()) {
+      const s = resolve(rc.ctx, p);
+      if (!(s instanceof PDFStream)) continue;
+      try {
+        for (const o of parseContentStream(streamBytes(rc.ctx, s))) {
+          const n = o.operands[0];
+          if (o.op === 'Do' && n?.type === 'name') out.add(n.value);
+        }
+      } catch {
+        // 読めない字形の手続きは、ビューアーも描けないので数えない
+      }
+    }
+  }
+  return out;
 }
 
 /** パスが（CTM で移した後に）軸にそろった矩形なら、その矩形 */
@@ -674,6 +717,7 @@ async function handleXObject(
   name: string,
   resources: ResourceEditor,
   gs: GState,
+  inheritedUse: UsedNames,
 ): Promise<string | 'remove' | null> {
   const raw = resources.lookupRaw('XObject', name);
   const xobj = resolve(rc.ctx, raw);
@@ -711,14 +755,32 @@ async function handleXObject(
     } finally {
       rc.formStack.delete(xobj);
     }
-    if (!result.changed) return null;
+    const usesParentResources = !(formResDict instanceof PDFDict);
+    if (!result.changed) {
+      // 書き換えない Form は、資源を持たなければ呼び出し元の資源を使い続ける
+      if (usesParentResources) {
+        for (const n of result.used.XObject) inheritedUse.XObject.add(n);
+        for (const n of result.used.Properties) inheritedUse.Properties.add(n);
+      }
+      return null;
+    }
     const dict = rc.ctx.obj({}) as PDFDict;
     for (const [k, v] of xobj.dict.entries()) {
       const key = k.decodeText();
       if (['Filter', 'DecodeParms', 'Length', 'Metadata', 'PieceInfo', 'LastModified', 'StructParent', 'StructParents'].includes(key)) continue;
       dict.set(k, v);
     }
-    if (formRes.changed && formRes.dict) dict.set(PDFName.of('Resources'), formRes.dict);
+    if (usesParentResources && formRes.dict) {
+      // 親の資源の辞書を共有したままにすると、後で親の側で使わない名前を外したときに、この Form の分まで消える。写しを持たせる
+      const snapshot = shallowCopy(rc.ctx, formRes.dict);
+      for (const [k, v] of snapshot.entries()) {
+        const sub = resolve(rc.ctx, v);
+        if (sub instanceof PDFDict) snapshot.set(k, shallowCopy(rc.ctx, sub));
+      }
+      dict.set(PDFName.of('Resources'), snapshot);
+    } else if (formRes.changed && formRes.dict) {
+      dict.set(PDFName.of('Resources'), formRes.dict);
+    }
     const stream = rc.ctx.flateStream(serializeOperations(result.ops));
     for (const [k, v] of dict.entries()) stream.dict.set(k, v);
     const ref: PDFRef = rc.ctx.register(stream);

@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PDFDocument, PDFName, PDFDict, PDFRawStream, PDFString, StandardFonts, decodePDFRawStream,
 } from 'pdf-lib';
+import { findEverywhere } from './helpers/deep-search';
 import { redactPdf, RedactionError } from '../../src/redaction/pdf-redactor';
 import {
   allText, extractText, extractImages, extractAnnotations, extractPathSegments, segmentCrossesInterior,
@@ -25,19 +26,7 @@ async function redact(bytes: Uint8Array, rects: Box[], pageNo = 1): Promise<Uint
 
 /** 出力のすべてのストリームを展開しても、そのバイト列が見つからない */
 async function expectNoStreamContains(after: Uint8Array, needle: Uint8Array | string) {
-  const n = Buffer.from(needle);
-  expect(Buffer.from(after).includes(n)).toBe(false);
-  const doc = await PDFDocument.load(after);
-  for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
-    if (!(obj instanceof PDFRawStream)) continue;
-    let data: Uint8Array;
-    try {
-      data = decodePDFRawStream(obj).decode();
-    } catch {
-      continue;
-    }
-    expect(Buffer.from(data).includes(n), `${ref} に残っている`).toBe(false);
-  }
+  expect(await findEverywhere(after, needle)).toEqual([]);
 }
 
 /** 範囲の中の画素が一色で、範囲から離れた画素が元のまま */
@@ -384,6 +373,82 @@ describe('図形', () => {
   });
 });
 
+describe('資源の後始末', () => {
+  it('資源に名前で置いた ActualText は、写しに差し替えた後、元が残らない', async () => {
+    const before = await rawPage('/Span /P1 BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      await font.embed();
+      page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      const props = doc.context.register(doc.context.obj({ ActualText: PDFString.of('SECRET-PROPS') }));
+      page.node.Resources()!.set(PDFName.of('Properties'), doc.context.obj({ P1: props }));
+    });
+    const after = await redact(before, [{ x: 45, y: 695, width: 60, height: 18 }]);
+    await expectNoStreamContains(after, 'SECRET-PROPS');
+    expect(await allText(after)).toContain('public');
+  });
+
+  it('資源を持たない Form が親の資源の画像を使うとき、その画像は外さない', async () => {
+    const px = pattern(40, 20);
+    const before = await rawPage('q 1 0 0 1 0 0 cm /Fx Do Q', (doc, page) => {
+      const img = doc.context.register(doc.context.flateStream(px, {
+        Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+      }));
+      // Resources の無い Form（古い PDF の形）。中で親の /Im0 を描く
+      const form = doc.context.register(doc.context.flateStream('q 200 0 0 100 300 300 cm /Im0 Do Q', {
+        Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 595, 842],
+      }));
+      page.node.setXObject(PDFName.of('Im0'), img);
+      page.node.setXObject(PDFName.of('Fx'), form);
+    });
+    // 画像にかからない場所を墨消しする
+    const after = await redact(before, [{ x: 50, y: 700, width: 50, height: 20 }]);
+    const imgs = await extractImages(after);
+    expect(imgs).toHaveLength(1);
+  });
+
+  it('資源を持たない Form を書き換えても、その Form だけが使う親の画像は残る', async () => {
+    const px = pattern(40, 20);
+    const before = await rawPage('/Fx Do /Im1 Do', async (doc, page) => {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      await font.embed();
+      page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      const mk = () => doc.context.register(doc.context.flateStream(px, {
+        Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+      }));
+      // 頁の中身は /Im1（大きさ 0 の変換で描かない位置ではなく、Do だけ）を使い、Form は /Im0 を使う
+      const form = doc.context.register(doc.context.flateStream(
+        'BT /F1 12 Tf 50 700 Td (SECRET-FORM) Tj ET q 200 0 0 100 300 300 cm /Im0 Do Q', { Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 595, 842] },
+      ));
+      page.node.setXObject(PDFName.of('Im0'), mk());
+      page.node.setXObject(PDFName.of('Im1'), mk());
+      page.node.setXObject(PDFName.of('Fx'), form);
+    });
+    const after = await redact(before, [{ x: 45, y: 695, width: 120, height: 18 }]);
+    await expectNoStreamContains(after, 'SECRET-FORM');
+    // Form の中の画像（300,300 に置いたもの）が描かれている
+    const imgs = await extractImages(after);
+    expect(imgs.some((im) => Math.abs(im.ctm[4] - 300) < 0.01 && Math.abs(im.ctm[0] - 200) < 0.01)).toBe(true);
+  });
+
+  it('資源を持たない Form の中で範囲にかかった画像は、塗った画像に差し替わり、元は残らない', async () => {
+    const px = pattern(40, 20);
+    const before = await rawPage('q /Fx Do Q', (doc, page) => {
+      const img = doc.context.register(doc.context.flateStream(px, {
+        Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+      }));
+      const form = doc.context.register(doc.context.flateStream('q 200 0 0 100 300 300 cm /Im0 Do Q', {
+        Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 595, 842],
+      }));
+      page.node.setXObject(PDFName.of('Im0'), img);
+      page.node.setXObject(PDFName.of('Fx'), form);
+    });
+    const rect = { x: 350, y: 320, width: 60, height: 40 };
+    const after = await redact(before, [rect]);
+    await expectImageRedacted(before, after, rect);
+    await expectNoStreamContains(after, px.subarray(0, 40));
+  });
+});
+
 describe('安全に消せないときは止める', () => {
   it('幅の分からないフォントの文字が範囲にかかり得るなら、RedactionError で止める', async () => {
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (SECRET) Tj ET', (doc, page) => {
@@ -441,7 +506,7 @@ describe('注釈・頁の作り', () => {
     const annots = await extractAnnotations(after);
     expect(annots.map((a) => a.subtype)).toEqual(['Text']);
     expect(annots[0].contents).toBe('public note');
-    expect(Buffer.from(after).includes(Buffer.from('secret@example.com'))).toBe(false);
+    await expectNoStreamContains(after, 'secret@example.com');
   });
 
   it('Q が多すぎる中身でも、黒い四角は範囲の位置に描かれる', async () => {

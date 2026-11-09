@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import {
   PDFDocument, PDFName, PDFString, PDFHexString, PDFRawStream, StandardFonts, rgb, decodePDFRawStream,
 } from 'pdf-lib';
+import { findEverywhere } from './helpers/deep-search';
 import { redactPdf } from '../../src/redaction/pdf-redactor';
 import {
   allText, extractText, extractImages, extractPathBoxes, extractPathSegments, segmentCrossesInterior,
@@ -35,19 +36,8 @@ async function expectOriginalImagesGone(before: Uint8Array, after: Uint8Array) {
 }
 
 /** 出力のすべてのストリームを展開しても、その文字列が見つからないことを確かめる */
-async function expectNoStreamContains(after: Uint8Array, needle: string) {
-  expect(Buffer.from(after).includes(Buffer.from(needle))).toBe(false);
-  const doc = await PDFDocument.load(after);
-  for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
-    if (!(obj instanceof PDFRawStream)) continue;
-    let data: Uint8Array;
-    try {
-      data = decodePDFRawStream(obj).decode();
-    } catch {
-      continue;
-    }
-    expect(Buffer.from(data).includes(Buffer.from(needle)), `${ref} に ${needle} が残っている`).toBe(false);
-  }
+async function expectNoStreamContains(after: Uint8Array, needle: Uint8Array | string) {
+  expect(await findEverywhere(after, needle)).toEqual([]);
 }
 
 async function redact(bytes: Uint8Array, rects: Box[], pageNo = 1): Promise<Uint8Array> {
@@ -232,7 +222,7 @@ describe('文字の PDF', () => {
     await expectNoStreamContains(after, 'SECRET-XOBJ');
     expect(await documentText(after)).not.toContain('SECRET');
     expect(await allText(after)).toContain('Public');
-    expect(Buffer.from(after).includes(Buffer.from('SECRET'))).toBe(false);
+    await expectNoStreamContains(after, 'SECRET');
   });
 
   it('ActualText で文字を持たせた範囲', async () => {
@@ -298,7 +288,7 @@ describe('注釈・フォーム・文書の情報', () => {
     const annots = await extractAnnotations(after);
     expect(JSON.stringify(annots)).not.toContain('SECRET');
     expect(await documentText(after)).not.toContain('SECRET');
-    expect(Buffer.from(after).includes(Buffer.from('SECRET'))).toBe(false);
+    await expectNoStreamContains(after, 'SECRET');
   });
 
   it('XMP メタデータ、しおり、Info が無くなる', async () => {
@@ -322,7 +312,7 @@ describe('注釈・フォーム・文書の情報', () => {
     const after = await redact(before, [{ x: 45, y: 695, width: 120, height: 18 }]);
     const info = await extractDocumentInfo(after);
     expect(JSON.stringify(info)).not.toContain('SECRET');
-    expect(Buffer.from(after).includes(Buffer.from('SECRET'))).toBe(false);
+    await expectNoStreamContains(after, 'SECRET');
   });
 
   it('どこからも参照されていないオブジェクトが残らない', async () => {
@@ -333,7 +323,7 @@ describe('注釈・フォーム・文書の情報', () => {
     doc.context.register(doc.context.stream('BT /F1 12 Tf 50 700 Td (SECRET-ORPHAN) Tj ET'));
     const before = await doc.save();
     const after = await redact(before, [{ x: 45, y: 745, width: 60, height: 18 }]);
-    expect(Buffer.from(after).includes(Buffer.from('SECRET-ORPHAN'))).toBe(false);
+    await expectNoStreamContains(after, 'SECRET-ORPHAN');
   });
 
   it('頁の縮小画像（Thumb）が残らない', async () => {
@@ -345,7 +335,7 @@ describe('注釈・フォーム・文書の情報', () => {
     page.node.set(PDFName.of('Thumb'), thumb);
     const before = await doc.save();
     const after = await redact(before, [{ x: 45, y: 745, width: 60, height: 18 }]);
-    expect(Buffer.from(after).includes(Buffer.from('SECRET-THUMB'))).toBe(false);
+    await expectNoStreamContains(after, 'SECRET-THUMB');
   });
 });
 
