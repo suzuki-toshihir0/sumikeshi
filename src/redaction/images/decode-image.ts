@@ -50,10 +50,8 @@ function rowBytes(width: number, bpc: number, ncomp: number): number {
 function ensureLength(data: Uint8Array, expected: number): Uint8Array {
   if (data.length === expected) return data;
   if (data.length > expected) return data.subarray(0, expected);
-  // 足りない分は 0 で埋める（ビューアーも同じように描く）
-  const out = new Uint8Array(expected);
-  out.set(data);
-  return out;
+  // 足りない: 埋めて作り直すと、元の画像を黙って壊すことになるので止める
+  throw new UnsupportedFilterError(`復号した画像のデータが足りない（${data.length} / ${expected} バイト）`);
 }
 
 function ccittDecode(ctx: PDFContext, params: PDFDict | undefined, data: Uint8Array, width: number, height: number): Uint8Array {

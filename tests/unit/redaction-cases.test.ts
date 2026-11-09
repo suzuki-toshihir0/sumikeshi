@@ -116,6 +116,28 @@ describe('画像のいろいろな形', () => {
     expect(smData.length).toBeGreaterThanOrEqual(w * h);
   });
 
+  it('/Mask（型の画像）付きの画像: 作り直した型も画像マスク（ImageMask）のまま', async () => {
+    const w = 40, h = 20;
+    const px = pattern(w, h);
+    const maskBits = new Uint8Array((w / 8) * h).map((_, i) => (i % 3 === 0 ? 0xf0 : 0x0f));
+    const before = await rawPage('q 200 0 0 100 100 600 cm /Im0 Do Q', (doc, page) => {
+      const mask = doc.context.register(doc.context.flateStream(maskBits, {
+        Type: 'XObject', Subtype: 'Image', Width: w, Height: h, ImageMask: true, BitsPerComponent: 1,
+      }));
+      const img = doc.context.register(doc.context.flateStream(px, {
+        Type: 'XObject', Subtype: 'Image', Width: w, Height: h, ColorSpace: 'DeviceGray', BitsPerComponent: 8, Mask: mask,
+      }));
+      page.node.setXObject(PDFName.of('Im0'), img);
+    });
+    const after = await redact(before, [{ x: 150, y: 620, width: 60, height: 40 }]);
+    const doc = await PDFDocument.load(after);
+    const xo = doc.getPages()[0].node.Resources()!.lookup(PDFName.of('XObject'), PDFDict);
+    const img = xo.lookup(xo.keys()[0]) as PDFRawStream;
+    const mask = img.dict.lookup(PDFName.of('Mask')) as PDFRawStream;
+    expect(mask.dict.get(PDFName.of('ImageMask'))?.toString()).toBe('true');
+    expect(mask.dict.has(PDFName.of('ColorSpace'))).toBe(false);
+  });
+
   it('パレット（Indexed）の画像', async () => {
     const w = 40, h = 20;
     const idx = new Uint8Array(w * h).map((_, i) => 1 + (i % 3));
@@ -786,6 +808,16 @@ describe('安全に消せないときは止める', () => {
 
   it('暗号化された PDF は RedactionError で止める', async () => {
     await expect(redact(fixture('encrypted.pdf'), [{ x: 148, y: 578, width: 70, height: 24 }])).rejects.toBeInstanceOf(RedactionError);
+  });
+
+  it('復号したデータが画像の大きさに足りないなら、黙って埋めずに RedactionError で止める', async () => {
+    const before = await rawPage('q 200 0 0 100 100 600 cm /Im0 Do Q', (doc, page) => {
+      const img = doc.context.register(doc.context.flateStream(new Uint8Array(10), {
+        Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+      }));
+      page.node.setXObject(PDFName.of('Im0'), img);
+    });
+    await expect(redact(before, [{ x: 150, y: 620, width: 60, height: 40 }])).rejects.toBeInstanceOf(RedactionError);
   });
 
   it('読めない形式の画像が範囲にかかるなら、RedactionError で止める', async () => {

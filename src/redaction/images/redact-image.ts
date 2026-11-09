@@ -256,14 +256,13 @@ async function rebuildImage(
     ['Width', PDFNumber.of(width)],
     ['Height', PDFNumber.of(height)],
   ];
-  if (isMask && role === 'image') {
+  if (isMask) {
+    // 画像マスク（Do で描く型）と、/Mask の型は、どちらも ImageMask のまま（色空間は持たない）
     entries.push(['ImageMask', PDFBool.True]);
     if (decodeArr.length === 2) entries.push(['Decode', ctx.obj(decodeArr)]);
   } else {
     entries.push(['BitsPerComponent', PDFNumber.of(bpc)]);
-    if (role === 'mask') {
-      entries.push(['ColorSpace', PDFName.of('DeviceGray')]);
-    } else if (role === 'smask') {
+    if (role === 'smask') {
       entries.push(['ColorSpace', PDFName.of('DeviceGray')]);
       const matte = get(ctx, dict, 'Matte');
       if (matte) entries.push(['Matte', matte]);
