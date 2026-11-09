@@ -377,6 +377,18 @@ describe('図形', () => {
     expect(segs.some(([[x0, y0], [x1, y1]]) => x0 === 400 && y0 === 400 && x1 === 300 && y1 === 300)).toBe(true);
   });
 
+  it('切り抜きのパス（W n）にした字形の輪郭も、範囲の中の部分が残らない', async () => {
+    // 三角形の「字形」で切り抜き、その中を塗る（グラデーション文字の形）
+    const before = await rawPage('q 50 700 m 70 730 l 90 700 l h W n 0 0 1 rg 0 0 595 842 re f Q');
+    const rect = { x: 45, y: 695, width: 50, height: 40 };
+    const after = await redact(before, [rect]);
+    const segs = await extractPathSegments(after);
+    // 黒い四角の辺は範囲の境目の上。内側を通る線分（字形の輪郭）は無い
+    expect(segs.some((sg) => segmentCrossesInterior(sg, rect))).toBe(false);
+    const content = await pageContent(after);
+    expect(content).not.toMatch(/\b70 730\b/);
+  });
+
   it('範囲にかかる曲線の塗り（角の丸い枠など）は、範囲の外の部分が残る', async () => {
     // 角の丸い大きな矩形（曲線を含む）
     const before = await rawPage('0.8 g 100 500 m 400 500 l 400 600 l 410 610 410 620 400 620 c 100 620 l h f');

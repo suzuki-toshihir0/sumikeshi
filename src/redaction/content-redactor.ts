@@ -455,13 +455,14 @@ export async function redactOperations(
     clipOp = null;
 
     const p = paint.op;
-    const fill = ['f', 'F', 'f*', 'B', 'B*', 'b', 'b*'].includes(p);
+    // n（塗らない）は、切り抜き（W n）の形を作るときに使う。形は塗りと同じく範囲を抜く
+    const clipOnly = p === 'n';
+    const fill = clipOnly || ['f', 'F', 'f*', 'B', 'B*', 'b', 'b*'].includes(p);
     const stroke = ['S', 's', 'B', 'B*', 'b', 'b*'].includes(p);
     const closesLast = ['s', 'b', 'b*'].includes(p);
     if (closesLast && paths.length > 0) paths[paths.length - 1].closed = true;
 
     const original = (): Operation[] => [...paths.flatMap((s) => s.ops), ...(clip ? [clip] : []), paint];
-    if (p === 'n') return original(); // 切り抜きだけのパス（後述の制約: 形は変えない）
 
     const ctm = gs.ctm;
     const halfWidth = stroke ? (Math.max(gs.lineWidth, 0) * maxScale(ctm)) / 2 + 0.5 : 0;
@@ -538,6 +539,12 @@ export async function redactOperations(
     if (!modified) return original();
     changed = true;
     markTouched();
+    if (clipOnly) {
+      // 切り抜きの形から範囲を抜く。範囲の中は黒い四角で隠れるので、そこが切り抜きの外になっても見た目は変わらない。
+      // 形が全部無くなったら、大きさ 0 の矩形で切り抜く（元の切り抜きは範囲の中だけだったので、外には何も見えていなかった）
+      const shape = result.length > 0 ? result : [{ op: 're', operands: [0, 0, 0, 0].map(numberOp) }];
+      return [...shape, ...(clip ? [clip] : []), paint];
+    }
     const paintOp: Operation = closesLast ? { op: p === 's' ? 'S' : p === 'b' ? 'B' : 'B*', operands: [] } : paint;
     const ops: Operation[] = [];
     if (clip) {
