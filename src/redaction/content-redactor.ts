@@ -164,6 +164,9 @@ export async function redactOperations(
    * （消す文字のためだけの Tz や Td を出力に残さないため）
    */
   let pendingText: (Operation & { leadingUsed?: number })[] = [];
+  /** 文字の形で切り抜く描き方（Tr 4〜7）の字を、この BT の中で消した／残した */
+  let clipGlyphRemoved = false;
+  let clipGlyphKept = false;
   const stack: GState[] = [];
   let tm: Matrix = IDENTITY;
   let tlm: Matrix = IDENTITY;
@@ -417,6 +420,7 @@ export async function redactOperations(
           needTm = true;
           removedAny = true;
           rc.stats.glyphsRemoved++;
+          if (gs.renderMode >= 4) clipGlyphRemoved = true;
           if (gs.font) {
             let set = rc.removedCodes.get(gs.font.dict);
             if (!set) rc.removedCodes.set(gs.font.dict, (set = new Set()));
@@ -424,6 +428,7 @@ export async function redactOperations(
           }
         } else {
           keep(Array.from(el.bytes.subarray(c.start, c.start + c.length)), el.hex);
+          if (gs.renderMode >= 4) clipGlyphKept = true;
         }
         const adv = model.advance(c);
         const spacing = gs.charSpacing + (model.isWordSpace(c) ? gs.wordSpacing : 0);
@@ -667,6 +672,8 @@ export async function redactOperations(
         positionUncertain = false;
         rewriting = false;
         needTm = false;
+        clipGlyphRemoved = false;
+        clipGlyphKept = false;
         out.push(o);
         break;
       case 'ET':
@@ -675,6 +682,11 @@ export async function redactOperations(
         rewriting = false;
         needTm = false;
         out.push(o);
+        if (clipGlyphRemoved && !clipGlyphKept) {
+          // 切り抜きに使う字を全部消した。ビューアーは字が無ければ切り抜きを変えないので、
+          // 元のとおり「字の形の中だけ」に近づけるため、大きさ 0 の切り抜きを置く（字はすべて範囲にかかっていた）
+          out.push({ op: 're', operands: [0, 0, 0, 0].map(numberOp) }, { op: 'W', operands: [] }, { op: 'n', operands: [] });
+        }
         break;
       case 'Tc': stateOp(o, () => { gs.charSpacing = num(operands[0]); }); break;
       case 'Tw': stateOp(o, () => { gs.wordSpacing = num(operands[0]); }); break;

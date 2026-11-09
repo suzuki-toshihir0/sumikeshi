@@ -548,6 +548,23 @@ describe('消した文字の位置の情報を残さない', () => {
     expect(w.box.x).toBeCloseTo(220 + 0.5, 2);
   });
 
+  it('文字の形で切り抜く描き方（Tr 7）の字を全部消したら、後の塗りが頁全体に広がらない', async () => {
+    const before = await rawPage('q BT 7 Tr /F1 40 Tf 50 700 Td (SECRET) Tj ET 0 0 1 rg 0 0 595 842 re f Q', async (doc, page) => {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      await font.embed();
+      page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+    });
+    const after = await redact(before, [{ x: 40, y: 680, width: 200, height: 60 }]);
+    const { parseContentStream } = await import('../../src/redaction/content/lexer');
+    const ops = parseContentStream(new Uint8Array(Buffer.from(await pageContent(after), 'latin1')));
+    const et = ops.findIndex((o) => o.op === 'ET');
+    const fillIndex = ops.findIndex((o, i) => i > et && o.op === 'f');
+    const between = ops.slice(et + 1, fillIndex).map((o) => o.op);
+    // ET と塗りの間で、大きさ 0 の切り抜きが効いている
+    expect(between).toEqual(expect.arrayContaining(['re', 'W', 'n']));
+    expect(await allText(after)).not.toContain('SECRET');
+  });
+
   it('書き直した BT の後の BT でも、文字の状態（フォントの大きさ・横の倍率）が正しい', async () => {
     const before = await rawPage(
       'BT /F1 12 Tf 50 700 Td (Keep ) Tj /F1 30 Tf 50 Tz (SECRET) Tj ET BT 50 600 Td (Next) Tj ET',
