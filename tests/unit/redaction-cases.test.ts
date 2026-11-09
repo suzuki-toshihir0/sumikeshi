@@ -9,6 +9,7 @@ import {
   PDFDocument, PDFName, PDFDict, PDFRawStream, PDFString, StandardFonts, decodePDFRawStream,
 } from 'pdf-lib';
 import { findEverywhere } from './helpers/deep-search';
+import { tinyTrueType } from './helpers/tiny-truetype';
 import { redactPdf, RedactionError } from '../../src/redaction/pdf-redactor';
 import {
   allText, extractText, extractImages, extractAnnotations, extractPathSegments, segmentCrossesInterior,
@@ -253,6 +254,34 @@ describe('文字のいろいろな形', () => {
     const after = await redact(before, [rect]);
     const text = await allText(after);
     expect(text.replace(/\s/g, '')).toBe('abb');
+  });
+
+  it('字形が文字送りの箱の外に描かれるフォント: 字形が範囲にかかる文字を消す（埋め込みの TrueType の外接矩形）', async () => {
+    // 4 つの字形はどれも文字送り 600 で、字形は原点から 1500〜2100（1.5 em 右）に描かれる
+    const ttf = tinyTrueType([null, [1500, 0, 2100, 700], [1500, 0, 2100, 700], [1500, 0, 2100, 700], [1500, 0, 2100, 700]]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <0001000200030004> Tj ET', (doc, page) => {
+      const fontFile = doc.context.register(doc.context.flateStream(ttf));
+      const toUnicode = doc.context.register(doc.context.stream(`/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+4 beginbfchar <0001> <0041> <0002> <0042> <0003> <0043> <0004> <0044> endbfchar endcmap end end`));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type0', BaseFont: 'Tiny', Encoding: 'Identity-H', ToUnicode: toUnicode,
+        DescendantFonts: [doc.context.obj({
+          Type: 'Font', Subtype: 'CIDFontType2', BaseFont: 'Tiny', CIDToGIDMap: 'Identity',
+          CIDSystemInfo: { Registry: PDFString.of('Adobe'), Ordering: PDFString.of('Identity'), Supplement: 0 },
+          FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'Tiny', Flags: 4, Ascent: 800, Descent: -200, FontBBox: [0, -200, 2100, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile2: fontFile }),
+          DW: 600,
+        })],
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    // B（2 番目）と C（3 番目）の字形の範囲: x = 50 + 7.2 * i + 18 〜 + 25.2。文字送りの箱（64.4〜78.8）にはかからない
+    const rect = { x: 50 + 7.2 * 1 + 18.5, y: 698, width: 7.2 + 6, height: 12 };
+    const after = await redact(before, [rect]);
+    const text = await allText(after);
+    expect(text).not.toContain('B');
+    expect(text).not.toContain('C');
+    expect(text).toContain('A');
   });
 
   it('Tc・Tw・Tz・Ts を使った文字でも、後ろの文字の位置が変わらない', async () => {

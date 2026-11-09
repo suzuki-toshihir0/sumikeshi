@@ -10,6 +10,7 @@ import type { FontNames } from '@pdf-lib/standard-fonts';
 import { get, getArray, getDict, getName, getNum, numbersOf, resolve, streamBytes } from '../pdf-objects';
 import { getEncoding, STANDARD_FONT_ALIASES } from '../vendor/pdfjs-encodings';
 import { CMap, loadPredefinedCMap, parseEmbeddedCMap, type CMapLoader } from './cmap';
+import { parseTrueType, simpleTrueTypeGid, type TrueTypeInfo } from './truetype';
 import type { Matrix } from '../geometry';
 
 export interface CharCode {
@@ -64,6 +65,25 @@ function verticalExtent(ctx: PDFContext, descriptor: PDFDict | undefined, fallba
   return [descent, ascent];
 }
 
+type Box4 = [number, number, number, number];
+
+/** 2 つの箱を両方含む箱 */
+function union(a: Box4, b: Box4 | null): Box4 {
+  if (!b) return a;
+  return [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[2], b[2]), Math.max(a[3], b[3])];
+}
+
+/** 埋め込みの TrueType（FontFile2）を読む。読めなければ null（字形の外接矩形は使わない） */
+function embeddedTrueType(ctx: PDFContext, descriptor: PDFDict | undefined): TrueTypeInfo | null {
+  const ff = get(ctx, descriptor, 'FontFile2');
+  if (!(ff instanceof PDFStream)) return null;
+  try {
+    return parseTrueType(streamBytes(ctx, ff));
+  } catch {
+    return null;
+  }
+}
+
 /** 単純フォント（1 バイトの符号）: Type1, MMType1, TrueType, Type3 */
 class SimpleFont implements FontModel {
   readonly vertical = false;
@@ -72,6 +92,8 @@ class SimpleFont implements FontModel {
     private readonly widths: (code: number) => number | undefined,
     private readonly extent: [number, number],
     private readonly zeroWidthHalf: number,
+    /** 字形の外接矩形（テキスト空間、大きさ 1）。分からなければ null */
+    private readonly ink: (code: number) => Box4 | null = () => null,
   ) {}
 
   split(bytes: Uint8Array): CharCode[] {
@@ -90,10 +112,11 @@ class SimpleFont implements FontModel {
   box(c: CharCode): [number, number, number, number] {
     const adv = this.advance(c);
     const [d, a] = this.extent;
-    if (adv > 0) return [0, d, adv, a];
-    if (adv < 0) return [adv, d, 0, a];
+    const ink = this.ink(c.code);
+    if (adv > 0) return union([0, d, adv, a], ink);
+    if (adv < 0) return union([adv, d, 0, a], ink);
     // 幅 0 の文字（結合文字や、幅を 0 にして Td で並べる PDF）。原点のまわりに箱を取る
-    return [-this.zeroWidthHalf, d, this.zeroWidthHalf, a];
+    return union([-this.zeroWidthHalf, d, this.zeroWidthHalf, a], ink);
   }
 
   isWordSpace(c: CharCode): boolean {
@@ -111,6 +134,8 @@ class CompositeFont implements FontModel {
     private readonly w2: Map<number, [number, number, number]>,
     private readonly dw2: [number, number],
     private readonly extent: [number, number],
+    /** CID ごとの字形の外接矩形（1/1000 em）。分からなければ null */
+    private readonly ink: (cid: number) => Box4 | null = () => null,
   ) {}
 
   get vertical(): boolean {
@@ -157,13 +182,16 @@ class CompositeFont implements FontModel {
     const w0 = this.hWidth(cid) / 1000;
     const [d, a] = this.extent.map((v) => v / 1000);
     const width = w0 > 0 ? w0 : 0.5;
+    const inkRaw = this.ink(cid);
+    const ink: Box4 | null = inkRaw ? [inkRaw[0] / 1000, inkRaw[1] / 1000, inkRaw[2] / 1000, inkRaw[3] / 1000] : null;
     if (!this.vertical) {
-      return w0 > 0 ? [0, d, w0, a] : [-width / 2, d, width / 2, a];
+      return union(w0 > 0 ? [0, d, w0, a] : [-width / 2, d, width / 2, a], ink);
     }
     const [, vx, vy] = this.vMetrics(cid);
     const ox = -vx / 1000;
     const oy = -vy / 1000;
-    return [ox, oy + d, ox + width, oy + a];
+    const shifted: Box4 | null = ink ? [ink[0] + ox, ink[1] + oy, ink[2] + ox, ink[3] + oy] : null;
+    return union([ox, oy + d, ox + width, oy + a], shifted);
   }
 
   isWordSpace(c: CharCode): boolean {
@@ -302,7 +330,19 @@ export async function createFontModel(ctx: PDFContext, fontDict: PDFDict, loader
     if (!descriptor) fallback = [(f.Descender as number | undefined) ?? f.FontBBox[1], (f.Ascender as number | undefined) ?? f.FontBBox[3]];
   }
   const [d, a] = verticalExtent(ctx, descriptor, fallback);
-  return new SimpleFont([0.001, 0, 0, 0.001, 0, 0], simpleWidths(ctx, fontDict, descriptor), [d / 1000, a / 1000], 0.25);
+  let ink: (code: number) => Box4 | null = () => null;
+  const tt = embeddedTrueType(ctx, descriptor);
+  if (tt) {
+    const symbolic = ((getNum(ctx, descriptor, 'Flags') ?? 0) & 4) !== 0;
+    const upem = tt.unitsPerEm;
+    ink = (code) => {
+      // 符号から Unicode は、ASCII の範囲だけ素直に対応させる（それ以外は cmap の (3,0) / (1,0) に頼る）
+      const gid = simpleTrueTypeGid(tt, code, code >= 0x20 && code < 0x7f ? code : undefined, symbolic);
+      const b = gid !== undefined ? tt.glyphBox(gid) : null;
+      return b ? [b[0] / upem, b[1] / upem, b[2] / upem, b[3] / upem] : null;
+    };
+  }
+  return new SimpleFont([0.001, 0, 0, 0.001, 0, 0], simpleWidths(ctx, fontDict, descriptor), [d / 1000, a / 1000], 0.25, ink);
 }
 
 async function createCompositeFont(ctx: PDFContext, fontDict: PDFDict, loader?: CMapLoader): Promise<FontModel> {
@@ -333,7 +373,23 @@ async function createCompositeFont(ctx: PDFContext, fontDict: PDFDict, loader?: 
   const dw2: [number, number] = dw2Arr.length === 2 ? [dw2Arr[0], dw2Arr[1]] : [880, -1000];
   const w2 = parseW2(ctx, getArray(ctx, cidFont, 'W2'));
   const extent = verticalExtent(ctx, descriptor, [-120, 880]);
-  return new CompositeFont(cmap, w, dw, w2, dw2, extent);
+  let ink: (cid: number) => Box4 | null = () => null;
+  const tt = getName(ctx, cidFont, 'Subtype') === 'CIDFontType2' ? embeddedTrueType(ctx, descriptor) : null;
+  if (tt) {
+    // CID → 字形の番号。CIDToGIDMap が無いか Identity なら同じ番号、ストリームなら 2 バイトずつの表
+    const mapObj = get(ctx, cidFont, 'CIDToGIDMap');
+    let toGid: (cid: number) => number = (cid) => cid;
+    if (mapObj instanceof PDFStream) {
+      const table = streamBytes(ctx, mapObj);
+      toGid = (cid) => (cid * 2 + 1 < table.length ? (table[cid * 2] << 8) | table[cid * 2 + 1] : 0);
+    }
+    const scale = 1000 / tt.unitsPerEm;
+    ink = (cid) => {
+      const b = tt.glyphBox(toGid(cid));
+      return b ? [b[0] * scale, b[1] * scale, b[2] * scale, b[3] * scale] : null;
+    };
+  }
+  return new CompositeFont(cmap, w, dw, w2, dw2, extent, ink);
 }
 
 export { PDFName };
