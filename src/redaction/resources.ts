@@ -54,13 +54,35 @@ export class ResourceEditor {
    * 中身で使われていない資源を外す（写しの上で。元の辞書は変えない）。
    * 差し替えた元の画像やフォームが、名前だけ残って保存されるのを防ぐ。
    */
-  pruneUnused(category: ResourceCategory, used: Set<string>): void {
+  pruneUnused(category: ResourceCategory, used: Set<string>): number {
     const cat = this.categoryDict(category);
-    if (!cat) return;
+    if (!cat) return 0;
     const unused = cat.keys().map((k) => k.decodeText()).filter((n) => !used.has(n));
-    if (unused.length === 0) return;
+    if (unused.length === 0) return 0;
     const c = this.ensureCategory(category);
     for (const n of unused) c.delete(PDFName.of(n));
+    return unused.length;
+  }
+
+  /**
+   * 種類の中の名前を、prefix1, prefix2, … と付け直す（元の名前の自然な順）。古い名前 → 新しい名前を返す。
+   * 外した資源の名前の欠け（F1, F3 の間の F2 など）から、消したものが分かるのを防ぐ。
+   */
+  renameAll(category: ResourceCategory, prefix: string): Map<string, string> {
+    const map = new Map<string, string>();
+    const cat = this.categoryDict(category);
+    if (!cat) return map;
+    const c = this.ensureCategory(category);
+    const natural = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
+    const names = c.keys().map((k) => k.decodeText()).sort(natural);
+    const values = names.map((nm) => c.get(PDFName.of(nm))!);
+    for (const nm of names) c.delete(PDFName.of(nm));
+    names.forEach((nm, i) => {
+      const nn = `${prefix}${i + 1}`;
+      map.set(nm, nn);
+      c.set(PDFName.of(nn), values[i]);
+    });
+    return map;
   }
 
   private ensureCategory(category: ResourceCategory): PDFDict {

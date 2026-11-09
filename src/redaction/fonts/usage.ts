@@ -7,6 +7,7 @@
  */
 import { PDFContext, PDFDict, PDFDocument, PDFName, PDFObject, PDFStream } from 'pdf-lib';
 import { parseContentStream, type Operand } from '../content/lexer';
+import { serializeOperations } from '../content/writer';
 import { contentsBytes, get, getArray, getDict, getName, inheritedPageAttr, numbersOf, resolve, streamBytes } from '../pdf-objects';
 import { createFontModel, type FontModel } from './font-model';
 import type { CMapLoader } from './cmap';
@@ -150,6 +151,124 @@ export async function collectFontUsage(
   }
   void numbersOf;
   return used;
+}
+
+/**
+ * 文書全体で、指定したフォントで描く文字列の符号を書き換える（Type3 の符号を詰め直したとき）。
+ * 頁の中身、Do で描く Form、注釈の外観、Type3 の字形の手続きを書き換えたストリームに差し替える。
+ */
+export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, Map<number, number>>): Promise<void> {
+  const ctx = doc.context;
+  const done = new Set<PDFStream>();
+  const lookup = (resources: PDFDict | undefined, category: string, name: string): PDFObject | undefined => {
+    const cat = getDict(ctx, resources, category);
+    return cat ? resolve(ctx, cat.get(PDFName.of(name))) : undefined;
+  };
+
+  /** 中身を書き換え、変わったら新しいバイト列を返す */
+  const rewrite = async (bytes: Uint8Array, resources: PDFDict | undefined, depth: number): Promise<Uint8Array | null> => {
+    if (depth > 32) return null;
+    let ops;
+    try {
+      ops = parseContentStream(bytes);
+    } catch {
+      return null;
+    }
+    let font: PDFDict | null = null;
+    const fontStack: (PDFDict | null)[] = [];
+    let changed = false;
+    const recodeString = (o: Operand): Operand => {
+      if (o.type !== 'string' || !font) return o;
+      const m = maps.get(font);
+      if (!m) return o;
+      changed = true;
+      return { type: 'string', hex: true, bytes: Uint8Array.from(o.bytes, (b) => m.get(b) ?? b) };
+    };
+    for (const o of ops) {
+      const a = o.operands;
+      switch (o.op) {
+        case 'q': fontStack.push(font); break;
+        case 'Q': font = fontStack.length > 0 ? fontStack.pop()! : font; break;
+        case 'Tf': {
+          const f = a[0]?.type === 'name' ? lookup(resources, 'Font', a[0].value) : undefined;
+          font = f instanceof PDFDict ? f : null;
+          if (font && getName(ctx, font, 'Subtype') === 'Type3') await rewriteType3Procs(font, resources, depth);
+          break;
+        }
+        case 'gs': {
+          const eg = a[0]?.type === 'name' ? lookup(resources, 'ExtGState', a[0].value) : undefined;
+          if (eg instanceof PDFDict) {
+            const fa = getArray(ctx, eg, 'Font');
+            const f = fa ? resolve(ctx, fa.get(0)) : undefined;
+            if (f instanceof PDFDict) font = f;
+          }
+          break;
+        }
+        case 'Tj': case "'": if (a[0]) a[0] = recodeString(a[0]); break;
+        case '"': if (a[2]) a[2] = recodeString(a[2]); break;
+        case 'TJ': if (a[0]?.type === 'array') a[0] = { type: 'array', items: a[0].items.map(recodeString) }; break;
+        case 'Do': {
+          const x = a[0]?.type === 'name' ? lookup(resources, 'XObject', a[0].value) : undefined;
+          if (x instanceof PDFStream && getName(ctx, x.dict, 'Subtype') === 'Form') await rewriteStream(x, resources, depth);
+          break;
+        }
+      }
+    }
+    return changed ? serializeOperations(ops) : null;
+  };
+
+  /** 間接オブジェクトのストリームを、書き換えた中身の新しいストリームに差し替える */
+  const rewriteStream = async (stream: PDFStream, parentResources: PDFDict | undefined, depth: number) => {
+    if (done.has(stream)) return;
+    done.add(stream);
+    const res = getDict(ctx, stream.dict, 'Resources') ?? parentResources;
+    const out = await rewrite(streamBytes(ctx, stream), res, depth + 1);
+    if (!out) return;
+    const ref = ctx.getObjectRef(stream);
+    if (!ref) return;
+    const ns = ctx.flateStream(out);
+    for (const [k, v] of stream.dict.entries()) {
+      if (['Filter', 'DecodeParms', 'Length'].includes(k.decodeText())) continue;
+      ns.dict.set(k, v);
+    }
+    ctx.assign(ref, ns);
+  };
+
+  const type3Done = new Set<PDFDict>();
+  const rewriteType3Procs = async (font: PDFDict, resources: PDFDict | undefined, depth: number) => {
+    if (type3Done.has(font)) return;
+    type3Done.add(font);
+    const procs = get(ctx, font, 'CharProcs');
+    const own = getDict(ctx, font, 'Resources');
+    if (!(procs instanceof PDFDict)) return;
+    for (const [, pv] of procs.entries()) {
+      const ps = resolve(ctx, pv);
+      if (ps instanceof PDFStream) await rewriteStream(ps, own ?? resources, depth);
+    }
+  };
+
+  for (const page of doc.getPages()) {
+    const node = page.node;
+    const res = inheritedPageAttr(ctx, node, 'Resources');
+    const out = await rewrite(contentsBytes(ctx, node.get(PDFName.of('Contents'))), res instanceof PDFDict ? res : undefined, 0);
+    if (out) node.set(PDFName.of('Contents'), ctx.register(ctx.flateStream(out)));
+    const annots = getArray(ctx, node, 'Annots');
+    for (let i = 0; annots && i < annots.size(); i++) {
+      const an = resolve(ctx, annots.get(i));
+      if (!(an instanceof PDFDict)) continue;
+      const ap = getDict(ctx, an, 'AP');
+      for (const k of ['N', 'R', 'D']) {
+        const v = get(ctx, ap, k);
+        if (v instanceof PDFStream) await rewriteStream(v, undefined, 0);
+        else if (v instanceof PDFDict) {
+          for (const [, sv] of v.entries()) {
+            const st = resolve(ctx, sv);
+            if (st instanceof PDFStream) await rewriteStream(st, undefined, 0);
+          }
+        }
+      }
+    }
+  }
 }
 
 export type { PDFContext };

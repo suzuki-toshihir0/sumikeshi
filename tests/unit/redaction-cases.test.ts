@@ -780,6 +780,71 @@ describe('ActualText の殻', () => {
   });
 });
 
+describe('消したものの痕跡（番号・名前・符号の穴）', () => {
+  it('オブジェクト番号に欠番を残さない', async () => {
+    const before = await rawPage('BT /A 12 Tf 50 700 Td (a) Tj ET BT /B 12 Tf 50 600 Td (a) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('A'), type3Font(doc, ['ga'], [11111]));
+      page.node.setFontDictionary(PDFName.of('B'), type3Font(doc, ['ga'], [55555]));
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const doc = await PDFDocument.load(after);
+    const nums = doc.context.enumerateIndirectObjects().map(([r]) => r.objectNumber).sort((a, b) => a - b);
+    expect(nums).toEqual(nums.map((_, i) => i + 1));
+  });
+
+  it('フォントの資源の名前に、消したフォントの欠けを残さない', async () => {
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td (a) Tj ET BT /F2 12 Tf 50 600 Td (a) Tj ET BT /F3 12 Tf 50 500 Td (a) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('F1'), type3Font(doc, ['ga'], [11111]));
+      page.node.setFontDictionary(PDFName.of('F2'), type3Font(doc, ['ga'], [55555]));
+      page.node.setFontDictionary(PDFName.of('F3'), type3Font(doc, ['ga'], [33333]));
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const doc = await PDFDocument.load(after);
+    const fonts = doc.getPages()[0].node.Resources()!.lookup(PDFName.of('Font'), PDFDict);
+    const names = fonts.keys().map((k) => k.decodeText()).sort();
+    expect(names).toHaveLength(2);
+    // 名前は付け直して、元の F1, F3 のような欠けた連番を残さない
+    expect(names).not.toEqual(['F1', 'F3']);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('aa');
+  });
+
+  it('Type3: 消した符号の「穴」を残さない（符号を詰め直し、文字列も書き換える）', async () => {
+    const before = await rawPage('BT /T3 12 Tf 50 700 Td (ad) Tj ET BT /T3 12 Tf 50 600 Td (bc) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('T3'), type3Font(doc, ['ga', 'gb', 'gc', 'gd'], [11111, 22222, 33333, 44444]));
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 30, height: 15 }]);
+    const doc = await PDFDocument.load(after);
+    const font = doc.getPages()[0].node.Resources()!.lookup(PDFName.of('Font'), PDFDict);
+    const t3 = font.lookup(font.keys()[0], PDFDict);
+    const first = (t3.lookup(PDFName.of('FirstChar')) as unknown as { asNumber(): number }).asNumber();
+    const last = (t3.lookup(PDFName.of('LastChar')) as unknown as { asNumber(): number }).asNumber();
+    // 残る字は a と d の 2 つ。符号は詰めて 2 つ分だけ
+    expect(last - first).toBe(1);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ad');
+    expect((await findEverywhere(after, '44444')).length).toBeGreaterThan(0);
+    expect(await findEverywhere(after, '22222')).toEqual([]);
+  });
+
+  it('使わない符号にも幅を入れたフォント（Word の形）では、消した文字の幅だけを 0 にしない', async () => {
+    const widths = Array.from({ length: 26 }, (_, i) => 500 + i * 10); // a〜z すべてに幅
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td (ab) Tj ET BT /F1 12 Tf 50 600 Td (k) Tj ET', (doc, page) => {
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'TrueType', BaseFont: 'ABCDEF+Body', FirstChar: 97, LastChar: 122, Widths: widths,
+        Encoding: 'WinAnsiEncoding',
+        FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'ABCDEF+Body', Flags: 32, Ascent: 700, Descent: -200, FontBBox: [0, -200, 800, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80 }),
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const doc = await PDFDocument.load(after);
+    const font = doc.getPages()[0].node.Resources()!.lookup(PDFName.of('Font'), PDFDict);
+    const f = font.lookup(font.keys()[0], PDFDict);
+    const ws = (f.lookup(PDFName.of('Widths')) as unknown as { asArray(): { asNumber(): number }[] }).asArray().map((x) => x.asNumber());
+    // k（0x6b）の幅が 0 になっていない（ほかの使わない字と区別が付かない）
+    expect(ws[0x6b - 97]).toBe(widths[0x6b - 97]);
+  });
+});
+
 describe('資源の後始末', () => {
   it('資源に名前で置いた ActualText は、写しに差し替えた後、元が残らない', async () => {
     const before = await rawPage('/Span /P1 BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {

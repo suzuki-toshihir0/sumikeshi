@@ -817,7 +817,17 @@ export async function redactOperations(
   resources.pruneUnused('XObject', used.XObject);
   resources.pruneUnused('Properties', used.Properties);
   // 消した文字だけが使っていたフォント（1 字ごとに別のフォントに分けた PDF など）は、資源から外して丸ごと消す
-  resources.pruneUnused('Font', used.Font);
+  const fontsPruned = resources.pruneUnused('Font', used.Font);
+  // 外したフォントの名前の欠けを残さないよう、残るフォントの名前を付け直す。
+  // 資源を持たない子の Form や Type3 の字形が親の名前を使うときは、付け直すと壊れるのでしない
+  if (fontsPruned > 0 && inheritedUse.Font.size === 0 && t3.Font.size === 0) {
+    const rename = resources.renameAll('Font', 'F');
+    for (const o of out) {
+      const n0 = o.operands[0];
+      if (o.op === 'Tf' && n0?.type === 'name' && rename.has(n0.value)) o.operands[0] = { type: 'name', value: rename.get(n0.value)! };
+    }
+    used.Font = new Set([...used.Font].map((nm) => rename.get(nm) ?? nm));
+  }
   return { ops: out, changed, used };
 }
 

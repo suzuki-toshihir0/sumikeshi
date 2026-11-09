@@ -13,7 +13,7 @@ import {
 import { get, getArray, getDict, getName, getNum, numbersOf, resolve, streamBytes } from '../pdf-objects';
 import { parseContentStream } from '../content/lexer';
 import { createFontModel, glyphNames, parseW, parseW2, type FontModel } from './font-model';
-import { collectFontUsage } from './usage';
+import { collectFontUsage, rewriteFontCodes } from './usage';
 import { parseTrueType, simpleTrueTypeGid, type TrueTypeInfo } from './truetype';
 import { scrubTrueType } from './truetype-scrub';
 import type { CMapLoader } from './cmap';
@@ -105,7 +105,7 @@ function writeToUnicode(map: Map<number, [number, Uint8Array]>, spaces: [Uint8Ar
   return lines.join('\n');
 }
 
-function scrubToUnicode(ctx: PDFContext, font: PDFDict, drop: Set<number>): void {
+function scrubToUnicode(ctx: PDFContext, font: PDFDict, drop: Set<number>, everUsed?: Set<number>, remap?: Map<number, number>): void {
   const tu = get(ctx, font, 'ToUnicode');
   if (!(tu instanceof PDFStream)) return;
   const parsed = readToUnicode(streamBytes(ctx, tu));
@@ -113,6 +113,21 @@ function scrubToUnicode(ctx: PDFContext, font: PDFDict, drop: Set<number>): void
     // 読めない ToUnicode は外す（文字のコピーができなくなるが、消した文字は残らない）
     font.delete(PDFName.of('ToUnicode'));
     return;
+  }
+  if (remap) {
+    // 符号を詰め直したフォント: 残る符号だけを新しい符号で書く
+    const next = new Map<number, [number, Uint8Array]>();
+    for (const [oldCode, nv] of remap) {
+      const e = parsed.map.get(oldCode);
+      if (e) next.set(nv, e);
+    }
+    font.set(PDFName.of('ToUnicode'), ctx.register(ctx.flateStream(writeToUnicode(next, parsed.spaces))));
+    return;
+  }
+  // 使わない符号まで並ぶ表なら、消した文字の分も残す（抜くと、どれを消したかが分かる）
+  if (everUsed) {
+    const unusedListed = [...parsed.map.keys()].filter((c) => !everUsed.has(c)).length;
+    if (unusedListed > 0 && unusedListed >= everUsed.size) return;
   }
   for (const c of drop) parsed.map.delete(c);
   font.set(PDFName.of('ToUnicode'), ctx.register(ctx.flateStream(writeToUnicode(parsed.map, parsed.spaces))));
@@ -233,15 +248,43 @@ function rebuildDifferences(ctx: PDFContext, font: PDFDict, drop: Set<number>): 
   font.set(PDFName.of('Encoding'), newEnc);
 }
 
+/**
+ * 元のフォントが「使わない符号にも幅や名前を入れる」流儀か。
+ * そうなら、消した文字の幅を 0 にしたり名前を抜いたりすると、かえって消した文字が目立つ（Word の PDF など）。
+ * 文書のどこでも使われていなかった符号の幅を見て、0 でないものが多ければそう判断する。
+ */
+function fillsUnusedCodes(ctx: PDFContext, font: PDFDict, everUsed: Set<number>): boolean {
+  const widths = getArray(ctx, font, 'Widths');
+  if (!widths) return false;
+  const first = getNum(ctx, font, 'FirstChar') ?? 0;
+  let zero = 0;
+  let nonZero = 0;
+  numbersOf(ctx, widths).forEach((w, i) => {
+    if (everUsed.has(first + i)) return;
+    if (w) nonZero++;
+    else zero++;
+  });
+  return nonZero > zero;
+}
+
 function zeroWidths(ctx: PDFContext, font: PDFDict, drop: Set<number>): void {
   const widths = getArray(ctx, font, 'Widths');
   if (!widths) return;
-  const first = getNum(ctx, font, 'FirstChar') ?? 0;
-  const ws = numbersOf(ctx, widths).map((w, i) => (drop.has(first + i) ? 0 : w));
+  let first = getNum(ctx, font, 'FirstChar') ?? 0;
+  let ws = numbersOf(ctx, widths).map((w, i) => (drop.has(first + i) ? 0 : w));
+  // 両端の 0 を詰め、FirstChar / LastChar も合わせる（端の符号を消したことが分からないように）
+  let lead = 0;
+  while (lead < ws.length - 1 && !ws[lead]) lead++;
+  let end = ws.length;
+  while (end > lead + 1 && !ws[end - 1]) end--;
+  ws = ws.slice(lead, end);
+  first += lead;
+  font.set(PDFName.of('FirstChar'), PDFNumber.of(first));
+  font.set(PDFName.of('LastChar'), PDFNumber.of(first + ws.length - 1));
   font.set(PDFName.of('Widths'), ctx.obj(ws));
 }
 
-function scrubSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Set<number>, stats: FontScrubStats): void {
+function scrubSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Set<number>, removed: Set<number>, stats: FontScrubStats): void {
   const subtype = getName(ctx, font, 'Subtype');
   const names = simpleNames(ctx, font);
   const descriptor = getDict(ctx, font, 'FontDescriptor');
@@ -286,11 +329,85 @@ function scrubSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Se
       }
     }
   }
-  zeroWidths(ctx, font, drop);
-  rebuildDifferences(ctx, font, drop);
-  scrubToUnicode(ctx, font, drop);
+  // 使わない符号にも幅や名前を入れる流儀なら、消した文字の分も残す（0 にすると、どれを消したかが分かる）
+  if (subtype === 'Type3') {
+    // Type3 は符号を詰め直す（消した符号の「穴」を残さない）。文字列の書き換えは後で文書全体に行う
+    return;
+  }
+  const everUsed = new Set([...used, ...removed]);
+  if (!fillsUnusedCodes(ctx, font, everUsed)) {
+    zeroWidths(ctx, font, drop);
+    rebuildDifferences(ctx, font, drop);
+  }
+  scrubToUnicode(ctx, font, drop, everUsed);
   cleanDescriptor(descriptor);
 }
+
+/** 符号を詰め直す割り当て。1 バイトの 32（語間 Tw がかかる）は動かさない */
+function compactCodes(kept: number[]): Map<number, number> {
+  const map = new Map<number, number>();
+  const pool = [...Array.from({ length: 223 }, (_, i) => 33 + i), ...Array.from({ length: 32 }, (_, i) => i)];
+  let k = 0;
+  for (const c of [...kept].sort((a, b) => a - b)) {
+    if (c === 32) map.set(32, 32);
+    else map.set(c, pool[k++]);
+  }
+  return map;
+}
+
+/** Type3 フォントの符号を詰め直す（Differences, Widths, FirstChar / LastChar, ToUnicode, FontBBox）。古い符号 → 新しい符号を返す */
+function recodeType3(ctx: PDFContext, font: PDFDict, used: Set<number>): Map<number, number> {
+  const names = simpleNames(ctx, font);
+  const widths = numbersOf(ctx, getArray(ctx, font, 'Widths'));
+  const first = getNum(ctx, font, 'FirstChar') ?? 0;
+  const map = compactCodes([...used].filter((c) => names[c]));
+  const newCodes = [...map.values()].sort((a, b) => a - b);
+  const lo = newCodes.length > 0 ? newCodes[0] : 0;
+  const hi = newCodes.length > 0 ? newCodes[newCodes.length - 1] : 0;
+  const ws = Array.from({ length: hi - lo + 1 }, () => 0);
+  const diffs: PDFObject[] = [];
+  for (const [oldC, newC] of [...map.entries()].sort((a, b) => a[1] - b[1])) {
+    ws[newC - lo] = widths[oldC - first] ?? 0;
+    diffs.push(PDFNumber.of(newC), PDFName.of(names[oldC]!));
+  }
+  const enc = ctx.obj({}) as PDFDict;
+  enc.set(PDFName.of('Type'), PDFName.of('Encoding'));
+  enc.set(PDFName.of('Differences'), ctx.obj(diffs));
+  font.set(PDFName.of('Encoding'), enc);
+  font.set(PDFName.of('FirstChar'), PDFNumber.of(lo));
+  font.set(PDFName.of('LastChar'), PDFNumber.of(hi));
+  font.set(PDFName.of('Widths'), ctx.obj(ws));
+  // FontBBox を、残る字形（d1 の外接矩形）だけで作り直す
+  const procs = get(ctx, font, 'CharProcs');
+  let bbox: number[] | null = null;
+  if (procs instanceof PDFDict) {
+    for (const oldC of map.keys()) {
+      const p = resolve(ctx, procs.get(PDFName.of(names[oldC]!)));
+      if (!(p instanceof PDFStream)) continue;
+      try {
+        const d1 = parseContentStream(streamBytes(ctx, p)).find((o) => o.op === 'd1');
+        const v = d1?.operands.slice(2, 6).map((o) => (o.type === 'number' ? o.value : NaN));
+        if (v && v.length === 4 && v.every(Number.isFinite)) {
+          const b = [Math.min(v[0], v[2]), Math.min(v[1], v[3]), Math.max(v[0], v[2]), Math.max(v[1], v[3])];
+          bbox = bbox ? [Math.min(bbox[0], b[0]), Math.min(bbox[1], b[1]), Math.max(bbox[2], b[2]), Math.max(bbox[3], b[3])] : b;
+        }
+      } catch {
+        // 読めない字形の手続きは、外接矩形に入れない
+      }
+    }
+  }
+  font.set(PDFName.of('FontBBox'), ctx.obj(bbox ?? [0, 0, 0, 0]));
+  // 新しい Differences から参照されない字形の手続きも外す
+  if (procs instanceof PDFDict) {
+    const keepNames = new Set([...map.keys()].map((c) => names[c]!));
+    const np = ctx.obj({}) as PDFDict;
+    for (const [k, v] of procs.entries()) if (keepNames.has(k.decodeText())) np.set(k, v);
+    font.set(PDFName.of('CharProcs'), np);
+  }
+  scrubToUnicode(ctx, font, new Set(), undefined, map);
+  return map;
+}
+
 
 async function scrubComposite(
   ctx: PDFContext, font: PDFDict, model: FontModel, drop: Set<number>, used: Set<number>, stats: FontScrubStats,
@@ -400,6 +517,7 @@ export async function scrubFonts(
   if (removedCodes.size === 0) return stats;
   const ctx = doc.context;
   const usage = await collectFontUsage(doc, new Set(removedCodes.keys()), fontCache, cmapLoader);
+  const recodeMaps = new Map<PDFDict, Map<number, number>>();
   for (const [font, removed] of removedCodes) {
     const used = usage.get(font) ?? new Set<number>();
     const drop = new Set([...removed].filter((c) => !used.has(c)));
@@ -414,9 +532,11 @@ export async function scrubFonts(
       }
       if (model) await scrubComposite(ctx, font, model, drop, used, stats);
     } else {
-      scrubSimple(ctx, font, drop, used, stats);
+      scrubSimple(ctx, font, drop, used, removed, stats);
+      if (getName(ctx, font, 'Subtype') === 'Type3') recodeMaps.set(font, recodeType3(ctx, font, used));
     }
   }
+  if (recodeMaps.size > 0) await rewriteFontCodes(doc, recodeMaps);
   return stats;
 }
 

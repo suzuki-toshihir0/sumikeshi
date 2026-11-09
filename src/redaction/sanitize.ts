@@ -66,6 +66,51 @@ export function sanitizeDocument(doc: PDFDocument): void {
   delete trailer.ID;
 
   collectGarbage(ctx);
+  renumberObjects(ctx);
+}
+
+/**
+ * オブジェクトの番号を 1 から詰め直す。消したオブジェクトの欠番から、消したもの（フォントなど）の数や順番が分かるのを防ぐ。
+ * 元の番号の順は保つ。
+ */
+export function renumberObjects(ctx: PDFContext): void {
+  const entries = ctx.enumerateIndirectObjects().sort((a, b) => a[0].objectNumber - b[0].objectNumber || a[0].generationNumber - b[0].generationNumber);
+  const map = new Map<PDFRef, PDFRef>();
+  entries.forEach(([ref], i) => map.set(ref, PDFRef.of(i + 1, 0)));
+  // 同じ辞書・配列が 2 か所から参照されていても、付け替えは 1 回だけ（新しい番号を古い番号と取り違えないため）
+  const done = new Set<PDFObject>();
+  const fix = (o: PDFObject | undefined, depth = 0): PDFObject | undefined => {
+    if (o === undefined || depth > 256) return o;
+    if (o instanceof PDFRef) return map.get(o) ?? o;
+    if (done.has(o)) return o;
+    if (o instanceof PDFDict || o instanceof PDFArray || o instanceof PDFStream) done.add(o);
+    if (o instanceof PDFDict) {
+      for (const [k, v] of o.entries()) {
+        const nv = fix(v, depth + 1);
+        if (nv !== v && nv !== undefined) o.set(k, nv);
+      }
+      return o;
+    }
+    if (o instanceof PDFArray) {
+      for (let i = 0; i < o.size(); i++) {
+        const v = o.get(i);
+        const nv = fix(v, depth + 1);
+        if (nv !== v && nv !== undefined) o.set(i, nv);
+      }
+      return o;
+    }
+    if (o instanceof PDFStream) {
+      fix(o.dict, depth + 1);
+      return o;
+    }
+    return o;
+  };
+  for (const [, obj] of entries) fix(obj);
+  for (const [ref] of entries) ctx.delete(ref);
+  for (const [ref, obj] of entries) ctx.assign(map.get(ref)!, obj);
+  const trailer = ctx.trailerInfo as Record<string, PDFObject | undefined>;
+  for (const k of Object.keys(trailer)) trailer[k] = fix(trailer[k]);
+  ctx.largestObjectNumber = entries.length;
 }
 
 /** どこからもたどれないオブジェクトを消す */
