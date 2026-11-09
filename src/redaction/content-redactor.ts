@@ -753,8 +753,8 @@ export async function redactOperations(
         break;
       case 'EMC': {
         const m = marked.pop();
-        if (m?.touched) stripMarkedContentText(rc, m.op, resources);
-        out.push(o);
+        const dropped = m?.touched ? stripMarkedContentText(rc, m.op, resources) : false;
+        if (!dropped) out.push(o);
         break;
       }
       case 'Do': {
@@ -790,7 +790,16 @@ export async function redactOperations(
     }
   }
   // 閉じていない BDC が範囲にかかっていた場合も、文字の情報を消す
-  for (const m of marked) if (m.touched) stripMarkedContentText(rc, m.op, resources);
+  for (const m of marked) {
+    // 閉じていない BDC は、外すと EMC と釣り合わなくなるので、属性だけを消す
+    if (m.touched && stripMarkedContentText(rc, m.op, resources)) {
+      m.op.op = 'BMC';
+      m.op.operands = [{ type: 'name', value: 'Span' }];
+    }
+  }
+  const finalOps = out.filter((o) => o.op !== DROPPED);
+  out.length = 0;
+  out.push(...finalOps);
   // 差し替えた元の画像・フォーム・属性は、資源に名前が残っていると保存されてしまうので外す
   const used: UsedNames = {
     XObject: new Set(inheritedUse.XObject), Properties: new Set(inheritedUse.Properties), Font: new Set(inheritedUse.Font),
@@ -927,29 +936,34 @@ function keptIntervals(a: Point, b: Point, rects: PdfRect[]): [number, number][]
   return intervals.filter(([s, e]) => (e - s) * len > 1e-6);
 }
 
-/** BDC の属性から、文字の情報（ActualText, Alt, E）を消す */
-function stripMarkedContentText(rc: RedactionContext, op: Operation, resources: ResourceEditor): void {
-  if (op.op !== 'BDC') return;
+/** 出力から外す命令の印 */
+const DROPPED = '__dropped__';
+
+/** BDC の属性から、文字の情報（ActualText, Alt, E）を消す。Marked Content ごと外したら true */
+function stripMarkedContentText(rc: RedactionContext, op: Operation, resources: ResourceEditor): boolean {
+  if (op.op !== 'BDC') return false;
   const props = op.operands[1];
   const keys = new Set(['ActualText', 'Alt', 'E']);
   if (props?.type === 'dict') {
     props.entries = props.entries.filter(([k]) => !keys.has(k));
-    // 属性が空になったら、属性の無い BMC にする（「ここに ActualText があった」という殻も残さない）
+    // 属性が空になったら、Marked Content ごと外す（「ここに ActualText があった」という殻も残さない）
     if (props.entries.length === 0) {
-      op.op = 'BMC';
-      op.operands = op.operands.slice(0, 1);
+      op.op = DROPPED;
+      op.operands = [];
+      return true;
     }
-    return;
+    return false;
   }
   if (props?.type === 'name') {
     const d = resources.lookup('Properties', props.value);
-    if (!(d instanceof PDFDict)) return;
-    if (![...keys].some((k) => d.has(PDFName.of(k)))) return;
+    if (!(d instanceof PDFDict)) return false;
+    if (![...keys].some((k) => d.has(PDFName.of(k)))) return false;
     const copy = rc.ctx.obj({}) as PDFDict;
     for (const [k, v] of d.entries()) if (!keys.has(k.decodeText())) copy.set(k, v);
     const name = resources.add('Properties', rc.ctx.register(copy), 'RedactedMC');
     op.operands[1] = { type: 'name', value: name };
   }
+  return false;
 }
 
 /** Do の XObject を処理する。差し替えたら新しい名前、消すなら 'remove'、変えないなら null */

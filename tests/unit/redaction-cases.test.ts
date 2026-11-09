@@ -748,6 +748,38 @@ describe('フォントに残る字形', () => {
   });
 });
 
+describe('ActualText の殻', () => {
+  it('ActualText を消して属性が空になった Marked Content は、BMC / EMC ごと残さない', async () => {
+    const before = await rawPage('/Span <</ActualText (X)>> BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      await font.embed();
+      page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+    });
+    const after = await redact(before, [{ x: 45, y: 695, width: 60, height: 18 }]);
+    const content = await pageContent(after);
+    expect(content).not.toMatch(/BMC|BDC|EMC/);
+    expect(await allText(after)).toContain('public');
+  });
+
+  it('Type3 の字形の手続きの中で別のフォントを使っていれば、その字形は消さない', async () => {
+    const before = await rawPage('BT /Outer 12 Tf 50 700 Td (a) Tj ET BT /Inner 12 Tf 50 600 Td (b) Tj ET', (doc, page) => {
+      const inner = type3Font(doc, ['ga', 'gb'], [11111, 22222]);
+      // 外側の Type3 の字形 a は、手続きの中で内側のフォントの b を描く
+      const proc = doc.context.register(doc.context.stream('500 0 0 0 400 700 d1 BT /In 1 Tf (b) Tj ET'));
+      const outer = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 400, 700], FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+        CharProcs: { ga: proc }, Encoding: { Type: 'Encoding', Differences: [97, PDFName.of('ga')] },
+        FirstChar: 97, LastChar: 97, Widths: [500], Resources: { Font: { In: inner } },
+      }));
+      page.node.setFontDictionary(PDFName.of('Outer'), outer);
+      page.node.setFontDictionary(PDFName.of('Inner'), inner);
+    });
+    // 内側のフォントで直接描いた b を消しても、外側の字形 a の中で b を使うので、b の字形は残す
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    expect((await findEverywhere(after, '22222')).length).toBeGreaterThan(0);
+  });
+});
+
 describe('資源の後始末', () => {
   it('資源に名前で置いた ActualText は、写しに差し替えた後、元が残らない', async () => {
     const before = await rawPage('/Span /P1 BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {

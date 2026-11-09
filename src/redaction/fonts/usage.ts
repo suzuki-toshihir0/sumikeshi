@@ -21,6 +21,7 @@ export async function collectFontUsage(
   const used = new Map<PDFDict, Set<number>>();
   for (const t of targets) used.set(t, new Set());
   const visited = new Set<string>();
+  const type3Walked = new Set<PDFDict>();
   let visitCount = 0;
 
   const model = (f: PDFDict): Promise<FontModel | null> => {
@@ -70,6 +71,18 @@ export async function collectFontUsage(
         case 'Tf': {
           const f = a[0]?.type === 'name' ? lookup(resources, 'Font', a[0].value) : undefined;
           font = f instanceof PDFDict ? f : null;
+          // Type3 の字形の手続きの中で使うフォントも数える（手続きは字ごとに描かれる）
+          if (font && getName(ctx, font, 'Subtype') === 'Type3' && !type3Walked.has(font)) {
+            type3Walked.add(font);
+            const procs = get(ctx, font, 'CharProcs');
+            const own = getDict(ctx, font, 'Resources');
+            if (procs instanceof PDFDict) {
+              for (const [, pv] of procs.entries()) {
+                const ps = resolve(ctx, pv);
+                if (ps instanceof PDFStream) await walk(ps, own ?? resources, depth + 1);
+              }
+            }
+          }
           break;
         }
         case 'gs': {
