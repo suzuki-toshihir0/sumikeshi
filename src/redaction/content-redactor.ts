@@ -468,22 +468,46 @@ export async function redactOperations(
     const halfWidth = stroke ? (Math.max(gs.lineWidth, 0) * maxScale(ctm)) / 2 + 0.5 : 0;
     const inv = invert(ctm);
     const result: Operation[] = [];
+    /** 塗りと線の両方を描く（B など）とき、線の側。切り口に線を引かないよう、塗りと分けて描く */
+    const fillAndStroke = fill && stroke && !clipOnly;
+    const strokeResult: Operation[] = [];
     let modified = false;
+
+    /** 線: 線分ごとに、範囲（線の太さの半分だけ広げる）の外の部分を残す */
+    const trimStroke = (sp: Subpath, hits: PdfRect[], into: Operation[], toUser: (q: Point) => Operand[]) => {
+      const poly = subpathPolyline(sp, ctm);
+      const expanded = hits.map((r) => inflate(r, halfWidth));
+      const segs: [Point, Point][] = [];
+      for (let i = 0; i + 1 < poly.length; i++) segs.push([poly[i], poly[i + 1]]);
+      if (sp.closed && poly.length > 2) segs.push([poly[poly.length - 1], poly[0]]);
+      for (const [da, db] of segs) {
+        for (const [t0, t1] of keptIntervals(da, db, expanded)) {
+          const p0: Point = [da[0] + (db[0] - da[0]) * t0, da[1] + (db[1] - da[1]) * t0];
+          const p1: Point = [da[0] + (db[0] - da[0]) * t1, da[1] + (db[1] - da[1]) * t1];
+          into.push({ op: 'm', operands: toUser(p0) }, { op: 'l', operands: toUser(p1) });
+        }
+      }
+    };
 
     for (const sp of paths) {
       const devPts = sp.points.map(([x, y]) => apply(ctm, x, y));
+      const keepAsIs = () => {
+        const ops = [...sp.ops];
+        // s / b / b* は最後のサブパスを閉じる。塗りの命令を S / B / B* に変えるので、明示して閉じる
+        if (closesLast && sp === paths[paths.length - 1] && sp.ops[sp.ops.length - 1]?.op !== 'h' && !sp.rect) {
+          ops.push({ op: 'h', operands: [] });
+        }
+        result.push(...ops);
+        if (fillAndStroke) strokeResult.push(...ops);
+      };
       if (devPts.length === 0) {
-        result.push(...sp.ops);
+        keepAsIs();
         continue;
       }
       const bounds = inflate(boundsOf(devPts), halfWidth);
       const hits = rc.rects.filter((r) => rectsOverlap(bounds, r));
       if (hits.length === 0) {
-        result.push(...sp.ops);
-        // s / b / b* は最後のサブパスを閉じる。塗りの命令を S / B / B* に変えるので、明示して閉じる
-        if (closesLast && sp === paths[paths.length - 1] && sp.ops[sp.ops.length - 1]?.op !== 'h' && !sp.rect) {
-          result.push({ op: 'h', operands: [] });
-        }
+        keepAsIs();
         continue;
       }
       modified = true;
@@ -492,6 +516,7 @@ export async function redactOperations(
         continue;
       }
       const toUser = (q: Point): Operand[] => apply(inv, q[0], q[1]).map(numberOp);
+      if (fillAndStroke) trimStroke(sp, hits, strokeResult, toUser);
 
       // 軸にそろった矩形の塗り: 範囲を抜いた残りの矩形にする
       const rectDev = axisAlignedRect(sp, ctm);
@@ -520,18 +545,7 @@ export async function redactOperations(
           result.push({ op: 'h', operands: [] });
         }
       } else {
-        // 線: 線分ごとに、範囲（線の太さの半分だけ広げる）の外の部分を残す
-        const expanded = hits.map((r) => inflate(r, halfWidth));
-        const segs: [Point, Point][] = [];
-        for (let i = 0; i + 1 < poly.length; i++) segs.push([poly[i], poly[i + 1]]);
-        if (sp.closed && poly.length > 2) segs.push([poly[poly.length - 1], poly[0]]);
-        for (const [da, db] of segs) {
-          for (const [t0, t1] of keptIntervals(da, db, expanded)) {
-            const p0: Point = [da[0] + (db[0] - da[0]) * t0, da[1] + (db[1] - da[1]) * t0];
-            const p1: Point = [da[0] + (db[0] - da[0]) * t1, da[1] + (db[1] - da[1]) * t1];
-            result.push({ op: 'm', operands: toUser(p0) }, { op: 'l', operands: toUser(p1) });
-          }
-        }
+        trimStroke(sp, hits, result, toUser);
       }
       rc.stats.pathsTrimmed++;
     }
@@ -550,6 +564,13 @@ export async function redactOperations(
     if (clip) {
       // 切り抜きは元の形のまま効かせ、塗りと線は書き換えた形で描く
       ops.push(...paths.flatMap((s) => s.ops), clip, { op: 'n', operands: [] });
+    }
+    if (fillAndStroke) {
+      // 塗り（範囲を抜いた形）と、線（元の輪郭の範囲の外の部分）を分けて描く
+      const fillOp = p === 'B*' || p === 'b*' ? 'f*' : 'f';
+      if (result.length > 0) ops.push(...result, { op: fillOp, operands: [] });
+      if (strokeResult.length > 0) ops.push(...strokeResult, { op: 'S', operands: [] });
+      return ops;
     }
     if (result.length > 0) ops.push(...result, paintOp);
     return ops;

@@ -399,6 +399,28 @@ describe('図形', () => {
     expect(segs.some(([[x0, y0], [x1, y1]]) => x0 === 400 && y0 === 400 && x1 === 300 && y1 === 300)).toBe(true);
   });
 
+  it('塗って線も引く矩形（B）: 範囲を抜いた切り口には線を引かない', async () => {
+    const before = await rawPage('1 1 1 RG 0.8 0.8 0 rg 10 w 50 500 400 300 re B');
+    const rect = { x: 200, y: 600, width: 100, height: 50 };
+    const after = await redact(before, [rect]);
+    const { parseContentStream } = await import('../../src/redaction/content/lexer');
+    const content = await pageContent(after);
+    const ops = parseContentStream(new Uint8Array(Buffer.from(content, 'latin1')));
+    // 線を引く命令（S）の前のパスに、範囲の縁（x=200, 300 / y=600, 650）に沿う線分が無い
+    let pts: number[][] = [];
+    const strokedOnEdge: number[][] = [];
+    for (const o of ops) {
+      const n = o.operands.map((x) => (x.type === 'number' ? x.value : NaN));
+      if (o.op === 'm' || o.op === 'l') pts.push(n);
+      else if (o.op === 're') pts.push([n[0], n[1]], [n[0] + n[2], n[1] + n[3]]);
+      else if (['S', 's', 'B', 'B*', 'b', 'b*'].includes(o.op)) {
+        for (const [x, y] of pts) if ((Math.abs(x - 200) < 0.01 || Math.abs(x - 300) < 0.01) && y > 590 && y < 660) strokedOnEdge.push([x, y]);
+        pts = [];
+      } else if (['f', 'f*', 'n'].includes(o.op)) pts = [];
+    }
+    expect(strokedOnEdge).toEqual([]);
+  });
+
   it('切り抜きのパス（W n）にした字形の輪郭も、範囲の中の部分が残らない', async () => {
     // 三角形の「字形」で切り抜き、その中を塗る（グラデーション文字の形）
     const before = await rawPage('q 50 700 m 70 730 l 90 700 l h W n 0 0 1 rg 0 0 595 842 re f Q');
