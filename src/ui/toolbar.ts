@@ -85,6 +85,11 @@ export class Toolbar {
     document.body.style.cursor = busy ? 'progress' : '';
   }
 
+  /** ダウンロードボタンを隠す（新しい PDF を開いたとき。前の文書の結果を落とせないように） */
+  hideDownload(): void {
+    this.downloadBtn.hidden = true;
+  }
+
   /** ダウンロードボタンを表示する */
   showDownload(): void {
     this.downloadBtn.hidden = false;

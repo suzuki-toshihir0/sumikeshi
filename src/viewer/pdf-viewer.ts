@@ -53,6 +53,8 @@ export class PdfViewer {
     const page = Math.min(initialPage ?? 1, this._totalPages);
     this._currentPageNumber = page;
     await this.renderPage(page);
+    // 新しい文書を開いたときは先頭から見せる（墨消しの後の描き直しでは位置を保つ）
+    if (initialPage === undefined) this.containerEl.scrollTop = 0;
   }
 
   /** コンテナ幅に収まるスケールを計算する */
@@ -77,6 +79,7 @@ export class PdfViewer {
     if (!this.doc) return;
     if (pageNum < 1 || pageNum > this._totalPages) return;
 
+    const pageChanged = pageNum !== this._currentPageNumber;
     this._currentPageNumber = pageNum;
     this.currentPage = await this.doc.getPage(pageNum);
     this.scale = this.calcFitWidthScale(this.currentPage);
@@ -99,6 +102,8 @@ export class PdfViewer {
     const textContent = await this.currentPage.getTextContent();
     await renderTextLayer(this.textLayerEl, textContent, this._viewport);
 
+    // 頁を移ったときは、その頁の先頭から見せる
+    if (pageChanged) this.containerEl.scrollTop = 0;
     this.onPageChange?.(this._currentPageNumber, this._totalPages);
     this.onPageRendered?.(this._currentPageNumber, this._viewport);
   }

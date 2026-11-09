@@ -151,6 +151,10 @@ class App {
     // (pdfjs-distがWorkerにtransferするとdetachedになるため)
     this.originalBytes = fileBytes.slice(0);
     this.store.clear();
+    // 前の文書の墨消しの結果を落とせないようにする
+    this.redactedBytes = null;
+    this.toolbar.hideDownload();
+    document.getSelection()?.removeAllRanges();
 
     // UI切り替え
     this.dropZone.hidden = true;
@@ -193,6 +197,8 @@ class App {
       const viewerBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
       const currentPage = this.viewer.currentPageNumber;
       await this.viewer.load(viewerBytes, currentPage);
+      // 描き直す前の文字に掛かっていたブラウザの選択を残さない
+      document.getSelection()?.removeAllRanges();
       this.selection.enable();
       this.toolbar.showDownload();
     } catch (err) {

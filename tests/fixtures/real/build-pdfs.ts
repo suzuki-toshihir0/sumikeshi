@@ -7,7 +7,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PDFDocument, PDFName, PDFString } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString, StandardFonts, degrees } from 'pdf-lib';
 
 const dir = dirname(fileURLToPath(import.meta.url));
 const PLACE = { x: 50, y: 500, width: 400, height: 150 };
@@ -81,8 +81,21 @@ async function predefinedCMap(): Promise<void> {
   writeFileSync(join(dir, 'cmap.pdf'), await doc.save({ useObjectStreams: false }));
 }
 
+async function rotated(): Promise<void> {
+  // /Rotate 90 の頁（横向きの書類をスキャンして回したような形）。2 頁目は回転なし
+  const doc = await PDFDocument.create({ updateMetadata: false });
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const page = doc.addPage([595, 842]);
+  page.setRotation(degrees(90));
+  page.drawText('Rotated page code: ROTSECRET end', { x: 60, y: 600, size: 20, font });
+  const page2 = doc.addPage([595, 842]);
+  page2.drawText('Second page', { x: 60, y: 700, size: 20, font });
+  writeFileSync(join(dir, 'rotated.pdf'), await doc.save({ useObjectStreams: false }));
+}
+
 await jbig2();
 await predefinedCMap();
+await rotated();
 await jpeg();
 await jpx();
 await cmyk();

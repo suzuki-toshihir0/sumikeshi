@@ -120,4 +120,58 @@ test.describe('ブラウザでの墨消し', () => {
     expect(text).toContain('氏名');
     expect(text).toContain('架空県');
   });
+
+  test('/Rotate 90 の頁でも、文字選択で選んだ文字が消える', async ({ page }) => {
+    const errors = collectErrors(page);
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('rotated.pdf'));
+    await waitForRender(page);
+    // 人と同じく、画面に見えている文字の上をドラッグする（テキストレイヤーの span の位置を使う）
+    const span = page.locator('#text-layer span', { hasText: 'ROTSECRET' }).first();
+    const box = await span.boundingBox();
+    expect(box).toBeTruthy();
+    const canvas = await page.locator('#pdf-canvas').boundingBox();
+    // 回した頁の文字は縦に並ぶ。span が canvas の中にあること
+    expect(box!.x).toBeGreaterThanOrEqual(canvas!.x - 1);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(canvas!.y + canvas!.height + 1);
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + 2);
+    await page.mouse.down();
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height - 2, { steps: 8 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect').first()).toBeVisible();
+    const after = await redactAndDownload(page);
+    expect(errors).toEqual([]);
+    const text = await allText(after);
+    expect(text).not.toContain('ROTSECRET');
+  });
+
+  test('墨消しの後、ブラウザの選択範囲が残らず、次の文字選択がすぐできる', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('cmap.pdf'));
+    await waitForRender(page);
+    const span = page.locator('#text-layer span', { hasText: '氏名' }).first();
+    const box = (await span.boundingBox())!;
+    await page.mouse.move(box.x + 1, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+    // 選んだ範囲は墨消しの範囲として登録され、ブラウザの選択は解除される
+    await expect(page.locator('.redaction-rect').first()).toBeVisible();
+    expect(await page.evaluate(() => document.getSelection()?.isCollapsed ?? true)).toBe(true);
+  });
+
+  test('新しい PDF を開くと、前の文書のダウンロードボタンは隠れ、スクロールは先頭に戻る', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('chrome.pdf'));
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    await dragPdfRect(page, 612, 792, { x: 140, y: 655, width: 63, height: 25 });
+    await page.locator('#btn-redact').click();
+    await expect(page.locator('#btn-download')).toBeVisible();
+    await page.locator('#viewer-container').evaluate((el) => { el.scrollTop = 400; });
+    await page.locator('#file-input').setInputFiles(fixture('jbig2.pdf'));
+    await expect(page.locator('#btn-download')).toBeHidden();
+    await waitForRender(page);
+    expect(await page.locator('#viewer-container').evaluate((el) => el.scrollTop)).toBe(0);
+  });
 });
