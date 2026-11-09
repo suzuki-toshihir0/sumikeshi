@@ -83,3 +83,37 @@ export function streamBytes(ctx: PDFContext, s: PDFStream): Uint8Array {
 }
 
 export { decodePDFRawStream };
+
+/** 頁の Contents（ストリーム 1 つか配列）を連結して読む。ストリームの境目には改行を入れる */
+export function contentsBytes(ctx: PDFContext, contents: PDFObject | undefined): Uint8Array {
+  const c = resolve(ctx, contents);
+  const streams: PDFStream[] = [];
+  if (c instanceof PDFStream) streams.push(c);
+  else if (c instanceof PDFArray) {
+    for (let i = 0; i < c.size(); i++) {
+      const s = resolve(ctx, c.get(i));
+      if (s instanceof PDFStream) streams.push(s);
+    }
+  }
+  const parts = streams.map((s) => streamBytes(ctx, s));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length + 1, 0));
+  let pos = 0;
+  for (const p of parts) {
+    out.set(p, pos);
+    pos += p.length;
+    out[pos++] = 0x0a;
+  }
+  return out;
+}
+
+/** 頁の属性を、親（Pages）から受け継いだものも含めて引く */
+export function inheritedPageAttr(ctx: PDFContext, page: PDFDict, key: string): PDFObject | undefined {
+  let node: PDFDict | undefined = page;
+  for (let i = 0; node && i < 64; i++) {
+    const v = node.get(PDFName.of(key));
+    if (v !== undefined) return resolve(ctx, v);
+    const parent = resolve(ctx, node.get(PDFName.of('Parent')));
+    node = parent instanceof PDFDict ? parent : undefined;
+  }
+  return undefined;
+}

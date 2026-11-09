@@ -11,6 +11,7 @@ import { get, getArray, getDict, getName, getNum, numbersOf, resolve, streamByte
 import { getEncoding, STANDARD_FONT_ALIASES } from '../vendor/pdfjs-encodings';
 import { CMap, loadPredefinedCMap, parseEmbeddedCMap, type CMapLoader } from './cmap';
 import { parseTrueType, simpleTrueTypeGid, type TrueTypeInfo } from './truetype';
+import { parseContentStream } from '../content/lexer';
 import type { Matrix } from '../geometry';
 
 export interface CharCode {
@@ -33,6 +34,10 @@ export interface FontModel {
   box(c: CharCode): [number, number, number, number];
   /** 語間（Tw）がかかる符号か（1 バイトの 32） */
   isWordSpace(c: CharCode): boolean;
+  /** 複合フォント（Type0）なら、符号から CID を引く */
+  cidOf?(code: number): number;
+  /** 複合フォント（Type0）なら、CMap */
+  readonly cmap?: CMap;
 }
 
 export class UnsupportedFontError extends Error {}
@@ -94,6 +99,8 @@ class SimpleFont implements FontModel {
     private readonly zeroWidthHalf: number,
     /** 字形の外接矩形（テキスト空間、大きさ 1）。分からなければ null */
     private readonly ink: (code: number) => Box4 | null = () => null,
+    /** 字形の外接矩形が確実か（字形が一意に決まる）。確実なら、文字送りの箱ではなく字形で判定する */
+    private readonly inkExact = false,
   ) {}
 
   split(bytes: Uint8Array): CharCode[] {
@@ -113,6 +120,7 @@ class SimpleFont implements FontModel {
     const adv = this.advance(c);
     const [d, a] = this.extent;
     const ink = this.ink(c.code);
+    if (ink && this.inkExact) return ink;
     if (adv > 0) return union([0, d, adv, a], ink);
     if (adv < 0) return union([adv, d, 0, a], ink);
     // 幅 0 の文字（結合文字や、幅を 0 にして Td で並べる PDF）。原点のまわりに箱を取る
@@ -128,7 +136,7 @@ class SimpleFont implements FontModel {
 class CompositeFont implements FontModel {
   readonly fontMatrix: Matrix = [0.001, 0, 0, 0.001, 0, 0];
   constructor(
-    private readonly cmap: CMap,
+    readonly cmap: CMap,
     private readonly w: Map<number, number>,
     private readonly dw: number,
     private readonly w2: Map<number, [number, number, number]>,
@@ -161,6 +169,10 @@ class CompositeFont implements FontModel {
     return this.cmap.lookupCid(c.code);
   }
 
+  cidOf(code: number): number {
+    return this.cmap.lookupCid(code);
+  }
+
   private hWidth(cid: number): number {
     return this.w.get(cid) ?? this.dw;
   }
@@ -185,13 +197,16 @@ class CompositeFont implements FontModel {
     const inkRaw = this.ink(cid);
     const ink: Box4 | null = inkRaw ? [inkRaw[0] / 1000, inkRaw[1] / 1000, inkRaw[2] / 1000, inkRaw[3] / 1000] : null;
     if (!this.vertical) {
-      return union(w0 > 0 ? [0, d, w0, a] : [-width / 2, d, width / 2, a], ink);
+      // CID から字形が一意に決まるので、字形の外接矩形で判定する（空白など字形の無いものは文字送りの箱）
+      if (ink) return ink;
+      return w0 > 0 ? [0, d, w0, a] : [-width / 2, d, width / 2, a];
     }
     const [, vx, vy] = this.vMetrics(cid);
     const ox = -vx / 1000;
     const oy = -vy / 1000;
     const shifted: Box4 | null = ink ? [ink[0] + ox, ink[1] + oy, ink[2] + ox, ink[3] + oy] : null;
-    return union([ox, oy + d, ox + width, oy + a], shifted);
+    if (shifted) return shifted;
+    return [ox, oy + d, ox + width, oy + a];
   }
 
   isWordSpace(c: CharCode): boolean {
@@ -199,7 +214,7 @@ class CompositeFont implements FontModel {
   }
 }
 
-function parseW(ctx: PDFContext, arr: PDFArray | undefined): Map<number, number> {
+export function parseW(ctx: PDFContext, arr: PDFArray | undefined): Map<number, number> {
   const out = new Map<number, number>();
   if (!arr) return out;
   const items = Array.from({ length: arr.size() }, (_, i) => resolve(ctx, arr.get(i)));
@@ -225,7 +240,7 @@ function parseW(ctx: PDFContext, arr: PDFArray | undefined): Map<number, number>
   return out;
 }
 
-function parseW2(ctx: PDFContext, arr: PDFArray | undefined): Map<number, [number, number, number]> {
+export function parseW2(ctx: PDFContext, arr: PDFArray | undefined): Map<number, [number, number, number]> {
   const out = new Map<number, [number, number, number]>();
   if (!arr) return out;
   const items = Array.from({ length: arr.size() }, (_, i) => resolve(ctx, arr.get(i)));
@@ -252,7 +267,7 @@ function parseW2(ctx: PDFContext, arr: PDFArray | undefined): Map<number, [numbe
 }
 
 /** 単純フォントの、符号 → グリフ名（標準 14 フォントで幅を引くため） */
-function glyphNames(ctx: PDFContext, fontDict: PDFDict, stdName: string): (string | undefined)[] {
+export function glyphNames(ctx: PDFContext, fontDict: PDFDict, stdName: string): (string | undefined)[] {
   const builtin = stdName === 'Symbol' ? 'SymbolSetEncoding' : stdName === 'ZapfDingbats' ? 'ZapfDingbatsEncoding' : 'StandardEncoding';
   const enc = get(ctx, fontDict, 'Encoding');
   let base = builtin;
@@ -318,8 +333,35 @@ export async function createFontModel(ctx: PDFContext, fontDict: PDFDict, loader
       const ys = [bbox[1], bbox[3]].map((y) => y * fontMatrix[3]);
       extent = [Math.min(...ys), Math.max(...ys)];
     }
+    // 字形の手続きの先頭の d1 にある外接矩形（字形はこの中に描かれる）。テキスト空間に移す
+    const names = glyphNames(ctx, fontDict, '');
+    const procs = get(ctx, fontDict, 'CharProcs');
+    const inkCache = new Map<number, Box4 | null>();
+    const ink = (code: number): Box4 | null => {
+      if (inkCache.has(code)) return inkCache.get(code)!;
+      let box: Box4 | null = null;
+      const name = names[code];
+      const proc = name && procs instanceof PDFDict ? resolve(ctx, procs.get(PDFName.of(name))) : undefined;
+      if (proc instanceof PDFStream) {
+        try {
+          const first = parseContentStream(streamBytes(ctx, proc)).find((o) => o.op === 'd1' || o.op === 'd0');
+          if (first?.op === 'd1' && first.operands.length >= 6) {
+            const [, , llx, lly, urx, ury] = first.operands.map((o) => (o.type === 'number' ? o.value : NaN));
+            if ([llx, lly, urx, ury].every(Number.isFinite) && (urx !== llx || ury !== lly)) {
+              const xs = [llx, urx].map((x) => x * fontMatrix[0]);
+              const ys = [lly, ury].map((y) => y * fontMatrix[3]);
+              box = [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+            }
+          }
+        } catch {
+          box = null;
+        }
+      }
+      inkCache.set(code, box);
+      return box;
+    };
     // Type3 の箱はテキスト空間で持つ（fontMatrix を掛けた後）
-    return new SimpleFont(fontMatrix, widthsFn, extent, 0.25);
+    return new SimpleFont(fontMatrix, widthsFn, extent, 0.25, ink, true);
   }
 
   const std = standardFontName(getName(ctx, fontDict, 'BaseFont'));

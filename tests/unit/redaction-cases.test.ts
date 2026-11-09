@@ -512,6 +512,139 @@ describe('消した文字の位置の情報を残さない', () => {
   });
 });
 
+/** Type3 フォントを作る。字形ごとに目印の数（d1 の値）を変え、出力に残るかを探せるようにする */
+function type3Font(doc: PDFDocument, names: string[], marks: number[]) {
+  const procs: Record<string, ReturnType<PDFDocument['context']['register']>> = {};
+  names.forEach((nm, i) => {
+    procs[nm] = doc.context.register(doc.context.stream(`500 0 ${marks[i]} 0 400 700 d1 0 0 400 700 re f`));
+  });
+  const bf = names.map((nm, i) => `<${(97 + i).toString(16)}> <00${(97 + i).toString(16)}>`).join(' ');
+  return doc.context.register(doc.context.obj({
+    Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 400, 700], FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+    CharProcs: procs, Encoding: { Type: 'Encoding', Differences: [97, ...names.map((nm) => PDFName.of(nm))] },
+    FirstChar: 97, LastChar: 97 + names.length - 1, Widths: names.map(() => 500), Resources: {},
+    ToUnicode: doc.context.register(doc.context.stream(`/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+1 begincodespacerange <00> <FF> endcodespacerange ${names.length} beginbfchar ${bf} endbfchar endcmap end end`)),
+  }));
+}
+
+describe('字形で判定する', () => {
+  it('Type3 の字形（d1 の外接矩形）が範囲にかからない文字は、文字送りの箱がかかっても残す', async () => {
+    // 字形 b は送り 1000 だが、描く範囲は左端の 0〜100 だけ
+    const before = await rawPage('BT /T3 12 Tf 50 700 Td (ab) Tj ET', (doc, page) => {
+      const pa = doc.context.register(doc.context.stream('1000 0 0 0 1000 700 d1 0 0 1000 700 re f'));
+      const pb = doc.context.register(doc.context.stream('1000 0 0 0 100 700 d1 0 0 100 700 re f'));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 1000, 700], FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+        CharProcs: { ga: pa, gb: pb }, Encoding: { Type: 'Encoding', Differences: [97, PDFName.of('ga'), PDFName.of('gb')] },
+        FirstChar: 97, LastChar: 98, Widths: [1000, 1000], Resources: {},
+        ToUnicode: doc.context.register(doc.context.stream(`/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+1 begincodespacerange <00> <FF> endcodespacerange 2 beginbfchar <61> <0061> <62> <0062> endbfchar endcmap end end`)),
+      }));
+      page.node.setFontDictionary(PDFName.of('T3'), font);
+    });
+    // b は x=62〜74（送り）、字形は 62〜63.2。範囲は 66〜80
+    const after = await redact(before, [{ x: 66, y: 695, width: 14, height: 18 }]);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ab');
+  });
+});
+
+describe('フォントに残る字形', () => {
+  it('Type3: 消した文字の字形・幅・名前・ToUnicode が残らず、残る文字は描ける', async () => {
+    const before = await rawPage('BT /T3 12 Tf 50 700 Td (ab) Tj ET BT /T3 12 Tf 50 600 Td (cd) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('T3'), type3Font(doc, ['ga', 'gb', 'gSecretC', 'gSecretD'], [11111, 22222, 33333, 44444]));
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 30, height: 15 }]);
+    expect(await findEverywhere(after, '33333')).toEqual([]);
+    expect(await findEverywhere(after, '44444')).toEqual([]);
+    expect(await findEverywhere(after, 'gSecretC')).toEqual([]);
+    // ToUnicode に c（0x63）と d（0x64）の対応が残らない
+    expect(await findEverywhere(after, '0063')).toEqual([]);
+    expect(await findEverywhere(after, '0064')).toEqual([]);
+    // 残る文字の字形は残る
+    expect((await findEverywhere(after, '11111')).length).toBeGreaterThan(0);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ab');
+  });
+
+  it('1 字ごとに別のフォントに分けた PDF: 消した文字だけが使うフォントは丸ごと残らない', async () => {
+    const before = await rawPage('BT /A 12 Tf 50 700 Td (a) Tj /B 12 Tf (a) Tj ET BT /A 12 Tf 50 600 Td (a) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('A'), type3Font(doc, ['ga'], [11111]));
+      page.node.setFontDictionary(PDFName.of('B'), type3Font(doc, ['ga'], [55555]));
+    });
+    // 1 行目の 2 文字目（フォント B の字）だけを消す
+    const after = await redact(before, [{ x: 56.5, y: 698, width: 5, height: 12 }]);
+    expect(await findEverywhere(after, '55555')).toEqual([]);
+    expect((await findEverywhere(after, '11111')).length).toBeGreaterThan(0);
+  });
+
+  it('同じ文字がほかの場所で使われていれば、字形は残す（描けなくならない）', async () => {
+    const before = await rawPage('BT /T3 12 Tf 50 700 Td (ab) Tj ET BT /T3 12 Tf 50 600 Td (ab) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('T3'), type3Font(doc, ['ga', 'gb'], [11111, 22222]));
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 30, height: 15 }]);
+    expect((await findEverywhere(after, '22222')).length).toBeGreaterThan(0);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ab');
+  });
+
+  it('埋め込みの TrueType（Type0）: 消した文字の字形・幅（W）・ToUnicode が残らない', async () => {
+    const ttf = tinyTrueType([null, [10, 0, 510, 700], [20, 0, 520, 700], [31, 0, 531, 701], [41, 0, 541, 702]]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <00010002> Tj ET BT /F1 12 Tf 50 600 Td <00030004> Tj ET', (doc, page) => {
+      const fontFile = doc.context.register(doc.context.flateStream(ttf));
+      const toUnicode = doc.context.register(doc.context.stream(`/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+4 beginbfchar <0001> <0041> <0002> <0042> <0003> <0043> <0004> <0044> endbfchar endcmap end end`));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type0', BaseFont: 'Tiny', Encoding: 'Identity-H', ToUnicode: toUnicode,
+        DescendantFonts: [doc.context.obj({
+          Type: 'Font', Subtype: 'CIDFontType2', BaseFont: 'Tiny', CIDToGIDMap: 'Identity',
+          CIDSystemInfo: { Registry: PDFString.of('Adobe'), Ordering: PDFString.of('Identity'), Supplement: 0 },
+          FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'Tiny', Flags: 4, Ascent: 800, Descent: -200, FontBBox: [0, -200, 600, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile2: fontFile }),
+          DW: 1000, W: [1, [601, 602, 603, 604]],
+        })],
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 30, height: 15 }]);
+    const doc = await PDFDocument.load(after);
+    const { parseTrueType } = await import('../../src/redaction/fonts/truetype');
+    let found = 0;
+    for (const [, o] of doc.context.enumerateIndirectObjects()) {
+      if (!(o instanceof PDFRawStream)) continue;
+      let tt;
+      try {
+        tt = parseTrueType(decodePDFRawStream(o).decode());
+      } catch {
+        continue;
+      }
+      expect(tt.glyphBox(1)).toEqual([10, 0, 510, 700]);
+      expect(tt.glyphBox(2)).toEqual([20, 0, 520, 700]);
+      expect(tt.glyphBox(3)).toBeNull();
+      expect(tt.glyphBox(4)).toBeNull();
+      found++;
+    }
+    expect(found).toBe(1);
+    expect(await findEverywhere(after, '603')).toEqual([]);
+    expect(await findEverywhere(after, '604')).toEqual([]);
+    expect(await findEverywhere(after, '0043')).toEqual([]);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('AB');
+  });
+
+  it('書き換えられない形式のフォント（CFF など）は、消した文字がもう使われなければ、フォントのデータごと外す', async () => {
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td (ab) Tj ET BT /F1 12 Tf 50 600 Td (cd) Tj ET', (doc, page) => {
+      const ff3 = doc.context.register(doc.context.stream('SECRET-CFF-PROGRAM', { Subtype: 'Type1C' }));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type1', BaseFont: 'ABCDEF+Mystery', FirstChar: 97, LastChar: 100, Widths: [500, 500, 500, 500],
+        FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'ABCDEF+Mystery', Flags: 32, Ascent: 700, Descent: -200, FontBBox: [0, -200, 600, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile3: ff3, CharSet: PDFString.of('/a/b/c/d') }),
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 30, height: 15 }]);
+    expect(await findEverywhere(after, 'SECRET-CFF-PROGRAM')).toEqual([]);
+    expect(await findEverywhere(after, '/a/b/c/d')).toEqual([]);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ab');
+  });
+});
+
 describe('資源の後始末', () => {
   it('資源に名前で置いた ActualText は、写しに差し替えた後、元が残らない', async () => {
     const before = await rawPage('/Span /P1 BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {

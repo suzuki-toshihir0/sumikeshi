@@ -27,6 +27,11 @@ import { redactImageXObject, redactInlineImage } from './images/redact-image';
 
 export interface RedactionStats {
   glyphsRemoved: number;
+  /** フォントから字形などを消したフォントの数 */
+  fontsScrubbed?: number;
+  glyphsScrubbed?: number;
+  /** 字形を書き換えられず、フォントのデータごと外したフォントの数（見た目が変わりうる） */
+  fontsUnembedded?: number;
   imagesRedacted: number;
   pathsRemoved: number;
   pathsTrimmed: number;
@@ -43,6 +48,8 @@ export interface RedactionContext {
   formStack: Set<PDFStream>;
   /** エラーの文言に使う頁番号 */
   pageNumber: number;
+  /** フォントごとの、消した文字の符号（後でフォントのデータから消すため） */
+  removedCodes: Map<PDFDict, Set<number>>;
 }
 
 /** フォントを設定した命令（Tf の資源の名前か、gs の ExtGState の名前） */
@@ -123,6 +130,7 @@ interface MarkedContent {
 export interface UsedNames {
   XObject: Set<string>;
   Properties: Set<string>;
+  Font: Set<string>;
 }
 
 export interface ContentResult {
@@ -166,7 +174,7 @@ export async function redactOperations(
   let clipOp: Operation | null = null;
   const marked: MarkedContent[] = [];
   /** 資源を持たない子の Form が、この資源から使っている名前 */
-  const inheritedUse: UsedNames = { XObject: new Set(), Properties: new Set() };
+  const inheritedUse: UsedNames = { XObject: new Set(), Properties: new Set(), Font: new Set() };
 
   const markTouched = () => {
     for (const m of marked) m.touched = true;
@@ -409,6 +417,11 @@ export async function redactOperations(
           needTm = true;
           removedAny = true;
           rc.stats.glyphsRemoved++;
+          if (gs.font) {
+            let set = rc.removedCodes.get(gs.font.dict);
+            if (!set) rc.removedCodes.set(gs.font.dict, (set = new Set()));
+            set.add(c.code);
+          }
         } else {
           keep(Array.from(el.bytes.subarray(c.start, c.start + c.length)), el.hex);
         }
@@ -737,16 +750,23 @@ export async function redactOperations(
   // 閉じていない BDC が範囲にかかっていた場合も、文字の情報を消す
   for (const m of marked) if (m.touched) stripMarkedContentText(rc, m.op, resources);
   // 差し替えた元の画像・フォーム・属性は、資源に名前が残っていると保存されてしまうので外す
-  const used: UsedNames = { XObject: new Set(inheritedUse.XObject), Properties: new Set(inheritedUse.Properties) };
+  const used: UsedNames = {
+    XObject: new Set(inheritedUse.XObject), Properties: new Set(inheritedUse.Properties), Font: new Set(inheritedUse.Font),
+  };
   for (const o of out) {
     const n0 = o.operands[0];
     const n1 = o.operands[1];
     if (o.op === 'Do' && n0?.type === 'name') used.XObject.add(n0.value);
+    if (o.op === 'Tf' && n0?.type === 'name') used.Font.add(n0.value);
     if ((o.op === 'BDC' || o.op === 'DP') && n1?.type === 'name') used.Properties.add(n1.value);
   }
-  for (const n of namesUsedByType3WithoutResources(rc, resources)) used.XObject.add(n);
+  const t3 = namesUsedByType3WithoutResources(rc, resources);
+  for (const n of t3.XObject) used.XObject.add(n);
+  for (const n of t3.Font) used.Font.add(n);
   resources.pruneUnused('XObject', used.XObject);
   resources.pruneUnused('Properties', used.Properties);
+  // 消した文字だけが使っていたフォント（1 字ごとに別のフォントに分けた PDF など）は、資源から外して丸ごと消す
+  resources.pruneUnused('Font', used.Font);
   return { ops: out, changed, used };
 }
 
@@ -754,8 +774,8 @@ export async function redactOperations(
  * Resources を持たない Type3 フォントの字形の手続きは、呼び出し元の資源を使う。
  * そこで Do している名前を集める（資源から外さないため）。
  */
-function namesUsedByType3WithoutResources(rc: RedactionContext, resources: ResourceEditor): Set<string> {
-  const out = new Set<string>();
+function namesUsedByType3WithoutResources(rc: RedactionContext, resources: ResourceEditor): { XObject: Set<string>; Font: Set<string> } {
+  const out = { XObject: new Set<string>(), Font: new Set<string>() };
   const fonts = resources.categoryDict('Font');
   if (!fonts) return out;
   for (const [, v] of fonts.entries()) {
@@ -769,7 +789,8 @@ function namesUsedByType3WithoutResources(rc: RedactionContext, resources: Resou
       try {
         for (const o of parseContentStream(streamBytes(rc.ctx, s))) {
           const n = o.operands[0];
-          if (o.op === 'Do' && n?.type === 'name') out.add(n.value);
+          if (o.op === 'Do' && n?.type === 'name') out.XObject.add(n.value);
+          if (o.op === 'Tf' && n?.type === 'name') out.Font.add(n.value);
         }
       } catch {
         // 読めない字形の手続きは、ビューアーも描けないので数えない
@@ -939,6 +960,7 @@ async function handleXObject(
       if (usesParentResources) {
         for (const n of result.used.XObject) inheritedUse.XObject.add(n);
         for (const n of result.used.Properties) inheritedUse.Properties.add(n);
+        for (const n of result.used.Font) inheritedUse.Font.add(n);
       }
       return null;
     }

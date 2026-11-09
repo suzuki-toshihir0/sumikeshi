@@ -19,6 +19,7 @@ import { IDENTITY } from './geometry';
 import { ResourceEditor } from './resources';
 import { removeOverlappingAnnotations, pruneFormFields } from './annotations';
 import { sanitizeDocument } from './sanitize';
+import { scrubFonts } from './fonts/scrub';
 import { resolve, streamBytes } from './pdf-objects';
 import { RedactionError } from './errors';
 import type { CMapLoader } from './fonts/cmap';
@@ -155,6 +156,7 @@ export async function redactPdf(
   const fontCache = new Map<PDFDict, Promise<FontModel>>();
   const cmapLoader = options.cmapLoader ?? defaultCMapLoader();
   const removedWidgets = new Set<PDFDict>();
+  const removedCodes = new Map<PDFDict, Set<number>>();
 
   for (const [pageNumber, rawRects] of redactionMap) {
     const rects = normalizeRects(rawRects);
@@ -173,7 +175,7 @@ export async function redactPdf(
     const resDict = inheritedAttr(page, 'Resources', doc);
     const resources = new ResourceEditor(ctx, resDict instanceof PDFDict ? resDict : undefined);
     const rc: RedactionContext = {
-      ctx, rects, cmapLoader, fontCache, stats, formStack: new Set(), pageNumber,
+      ctx, rects, cmapLoader, fontCache, stats, formStack: new Set(), pageNumber, removedCodes,
     };
     const result = await redactOperations(rc, ops, resources, IDENTITY);
 
@@ -185,6 +187,9 @@ export async function redactPdf(
   }
 
   if (removedWidgets.size > 0) pruneFormFields(ctx, doc.catalog, removedWidgets);
+  // 消した文字の字形・幅・名前を、フォントからも消す（もう使われない符号だけ）
+  const fontStats = await scrubFonts(doc, removedCodes, fontCache, cmapLoader);
+  Object.assign(stats, fontStats);
   sanitizeDocument(doc);
   options.onStats?.(stats);
   return doc.save({ updateFieldAppearances: false, addDefaultPage: false });
