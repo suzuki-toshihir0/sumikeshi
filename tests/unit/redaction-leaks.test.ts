@@ -354,6 +354,25 @@ describe('実在の作り方の PDF', () => {
     expect(text).toContain('架空県見本市');
   });
 
+  it('文字選択で 1 文字ずつ並んだ範囲は、1 つの黒い四角にまとめる（字数や区切りを見せない）', async () => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([595, 842]);
+    page.drawText('ABCD EFGH', { x: 50, y: 700, size: 12, font });
+    const before = await doc.save();
+    // 1 文字ずつの選択の矩形（空白の所は隙間）
+    const xs = [50, 58, 66, 74.7, 87, 95, 103, 111];
+    const rects = xs.map((x) => ({ x, y: 697, width: 7.5, height: 14 }));
+    const after = await redact(before, rects);
+    const segs = await extractPathSegments(after);
+    // 黒い四角は 1 つ（4 辺）だけで、左端 50 から右端 118.5 まで
+    const xsOnBox = segs.filter(([[, y0], [, y1]]) => Math.abs(y0 - 697) < 0.01 && Math.abs(y1 - 697) < 0.01);
+    expect(xsOnBox).toHaveLength(1);
+    const [[ax], [bx]] = xsOnBox[0];
+    expect(Math.min(ax, bx)).toBeCloseTo(50);
+    expect(Math.max(ax, bx)).toBeCloseTo(118.5);
+  });
+
   it('既存の黒い四角: 墨消しの範囲に黒い四角が描かれる', async () => {
     const doc = await PDFDocument.create();
     const font = await doc.embedFont(StandardFonts.Helvetica);

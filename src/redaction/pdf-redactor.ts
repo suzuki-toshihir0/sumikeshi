@@ -58,6 +58,47 @@ function normalizeRects(rects: PdfRect[]): PdfRect[] {
     .filter((r) => r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].every(Number.isFinite));
 }
 
+/**
+ * 同じ行（縦書きなら同じ列）で隣り合う範囲を 1 つにまとめる。
+ * 文字選択では 1 文字ずつの矩形が並ぶので、そのまま黒い四角にすると、字数や姓と名の区切りが見えてしまう。
+ * 消す範囲もまとめた形で扱う（隙間の空白も消える）。
+ */
+export function mergeRects(rects: PdfRect[]): PdfRect[] {
+  let list = rects.map((r) => ({ ...r }));
+  const overlap1d = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer: for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i];
+        const b = list[j];
+        const vOverlap = overlap1d(a.y, a.y + a.height, b.y, b.y + b.height);
+        const hOverlap = overlap1d(a.x, a.x + a.width, b.x, b.x + b.width);
+        const minH = Math.min(a.height, b.height);
+        const minW = Math.min(a.width, b.width);
+        // 横に並ぶ（同じ行）: 縦の重なりが高さの半分以上で、横の隙間が高さの 0.6 倍以下
+        const sameLine = vOverlap >= minH * 0.5 && -hOverlap <= minH * 0.6;
+        // 縦に並ぶ（同じ列）: 横の重なりが幅の半分以上で、縦の隙間が幅の 0.6 倍以下
+        const sameColumn = hOverlap >= minW * 0.5 && -vOverlap <= minW * 0.6;
+        // 面積を持って重なる
+        const intersect = vOverlap > 0 && hOverlap > 0;
+        if (sameLine || sameColumn || intersect) {
+          const x0 = Math.min(a.x, b.x);
+          const y0 = Math.min(a.y, b.y);
+          const x1 = Math.max(a.x + a.width, b.x + b.width);
+          const y1 = Math.max(a.y + a.height, b.y + b.height);
+          list[i] = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+          list = list.filter((_, k) => k !== j);
+          merged = true;
+          break outer;
+        }
+      }
+    }
+  }
+  return list;
+}
+
 /** 頁の属性を、親（Pages）から受け継いだものも含めて引く */
 function inheritedAttr(page: PDFDict, key: string, doc: PDFDocument): unknown {
   let node: PDFDict | undefined = page;
@@ -159,7 +200,7 @@ export async function redactPdf(
   const removedCodes = new Map<PDFDict, Set<number>>();
 
   for (const [pageNumber, rawRects] of redactionMap) {
-    const rects = normalizeRects(rawRects);
+    const rects = mergeRects(normalizeRects(rawRects));
     if (rects.length === 0) continue;
     const pageIndex = pageNumber - 1;
     if (pageIndex < 0 || pageIndex >= pages.length) continue;
