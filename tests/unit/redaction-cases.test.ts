@@ -402,6 +402,116 @@ describe('図形', () => {
   });
 });
 
+/** TJ の配列の中の、絶対値が 300 以上の数値（ふつうのカーニングより大きい移動） */
+function largeTjAdjustments(content: string): number[] {
+  const out: number[] = [];
+  for (const m of content.matchAll(/\[([^\]]*)\]\s*TJ/g)) {
+    const inner = m[1].replace(/\((?:\\.|[^\\)])*\)|<[0-9a-fA-F\s]*>/g, ' ');
+    for (const n of inner.match(/-?\d+(\.\d+)?/g) ?? []) if (Math.abs(parseFloat(n)) >= 300) out.push(parseFloat(n));
+  }
+  return out;
+}
+
+/** 頁の中身（展開した ContentStream）を文字列で返す */
+async function pageContent(pdf: Uint8Array, pageNo = 1): Promise<string> {
+  const doc = await PDFDocument.load(pdf);
+  const c = doc.getPages()[pageNo - 1].node.lookup(PDFName.of('Contents'));
+  return Buffer.from(decodePDFRawStream(c as PDFRawStream).decode()).toString('latin1');
+}
+
+describe('消した文字の位置の情報を残さない', () => {
+  it('行の末尾で消した文字の送りの幅を、数値として残さない', async () => {
+    // Helvetica 12pt で "Name: " の後に氏名。氏名の幅（1/1000 em）を数値として残してはいけない
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td (Name: ) Tj (Patricia Davis) Tj ET BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      await font.embed();
+      page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+    });
+    const after = await redact(before, [{ x: 86.5, y: 695, width: 90, height: 18 }]);
+    const content = await pageContent(after);
+    // TJ の数値で消した文字の送りを埋めていれば、大きな数値（1/1000 em で数千）が残る
+    expect(largeTjAdjustments(content)).toEqual([]);
+    expect(await allText(after)).toContain('Name:');
+    expect(await allText(after)).toContain('public');
+  });
+
+  it('1 文字ずつ Td で進める PDF（Chrome の形）でも、消した文字の数と幅が分からない', async () => {
+    // 3 文字の氏名を 1 文字ずつ描き、後ろに残る文字が続く
+    const before = await rawPage(
+      'BT /F1 12 Tf 50 700 Td (A) Tj 7.336 0 Td (B) Tj 8.004 0 Td (C) Tj 8.664 0 Td (D) Tj 8.664 0 Td (E) Tj ET',
+      async (doc, page) => {
+        const font = await doc.embedFont(StandardFonts.Helvetica);
+        await font.embed();
+        page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      },
+    );
+    // B, C, D（x = 57.3〜82.0）を消す。A は 50〜58.0、E は 82.668 から
+    const after = await redact(before, [{ x: 58.5, y: 695, width: 24, height: 18 }]);
+    const content = await pageContent(after);
+    expect(content).not.toMatch(/8\.004|8\.664/);
+    const text = await allText(after);
+    expect(text.replace(/\s/g, '')).toBe('AE');
+    // E の位置は変わらない
+    const e = (await extractText(after)).find((t) => t.str.includes('E'))!;
+    expect(e.box.x).toBeCloseTo(50 + 7.336 + 8.004 + 8.664 + 8.664, 2);
+  });
+
+  it('OCR の文字層の語の幅（Tz）を、消した語の分は残さない', async () => {
+    const before = await rawPage(
+      'BT 3 Tr /F1 10 Tf 1 0 0 1 50 700 Tm 87.5 Tz (Hello) Tj 1 0 0 1 120 700 Tm 123.45 Tz (SECRET) Tj 1 0 0 1 220 700 Tm 95 Tz (World) Tj ET',
+      async (doc, page) => {
+        const font = await doc.embedFont(StandardFonts.Helvetica);
+        await font.embed();
+        page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      },
+    );
+    const after = await redact(before, [{ x: 118, y: 695, width: 60, height: 18 }]);
+    const content = await pageContent(after);
+    expect(content).not.toContain('123.45');
+    const text = (await allText(after)).replace(/\s/g, '');
+    expect(text).toBe('HelloWorld');
+    const w = (await extractText(after)).find((t) => t.str.includes('World'))!;
+    expect(w.box.x).toBeCloseTo(220, 2);
+  });
+
+  it('TJ が数値から始まり、消す文字が続くときも、消す文字のための Tz を残さない', async () => {
+    const before = await rawPage(
+      'BT /F1 10 Tf 1 0 0 1 50 700 Tm (Keep) Tj ET BT /F1 10 Tf 1 0 0 1 120 700 Tm 123.45 Tz [-100 (SECRET)] TJ ET BT /F1 10 Tf 100 Tz 1 0 0 1 220 700 Tm [-50 (World)] TJ ET',
+      async (doc, page) => {
+        const font = await doc.embedFont(StandardFonts.Helvetica);
+        await font.embed();
+        page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      },
+    );
+    const after = await redact(before, [{ x: 118, y: 695, width: 80, height: 18 }]);
+    const content = await pageContent(after);
+    expect(content).not.toContain('123.45');
+    const pa = await extractText(after);
+    expect(pa.map((t) => t.str).join('').replace(/\s/g, '')).toBe('KeepWorld');
+    const w = pa.find((t) => t.str.includes('World'))!;
+    expect(w.box.x).toBeCloseTo(220 + 0.5, 2);
+  });
+
+  it('書き直した BT の後の BT でも、文字の状態（フォントの大きさ・横の倍率）が正しい', async () => {
+    const before = await rawPage(
+      'BT /F1 12 Tf 50 700 Td (Keep ) Tj /F1 30 Tf 50 Tz (SECRET) Tj ET BT 50 600 Td (Next) Tj ET',
+      async (doc, page) => {
+        const font = await doc.embedFont(StandardFonts.Helvetica);
+        await font.embed();
+        page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      },
+    );
+    const pb = await extractText(before);
+    const after = await redact(before, [{ x: 80, y: 690, width: 200, height: 40 }]);
+    const pa = await extractText(after);
+    const nb = pb.find((t) => t.str.includes('Next'))!;
+    const na = pa.find((t) => t.str.includes('Next'))!;
+    expect(na.box.width).toBeCloseTo(nb.box.width, 2);
+    expect(na.box.height).toBeCloseTo(nb.box.height, 2);
+    expect(pa.map((t) => t.str).join('')).not.toContain('SECRET');
+  });
+});
+
 describe('資源の後始末', () => {
   it('資源に名前で置いた ActualText は、写しに差し替えた後、元が残らない', async () => {
     const before = await rawPage('/Span /P1 BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {

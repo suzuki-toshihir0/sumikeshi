@@ -45,21 +45,58 @@ export interface RedactionContext {
   pageNumber: number;
 }
 
-interface GState {
-  ctm: Matrix;
-  font: { dict: PDFDict; name: string } | null;
+/** フォントを設定した命令（Tf の資源の名前か、gs の ExtGState の名前） */
+interface FontRef {
+  dict: PDFDict;
+  name: string;
+  via: 'Tf' | 'gs';
+}
+
+/** 出力の側（ビューアー）で今効いている文字の状態 */
+interface EmitState {
+  font: string | null;
   fontSize: number;
   charSpacing: number;
   wordSpacing: number;
   hScale: number;
   leading: number;
   rise: number;
+  renderMode: number;
+}
+
+interface GState {
+  ctm: Matrix;
+  font: FontRef | null;
+  fontSize: number;
+  charSpacing: number;
+  wordSpacing: number;
+  hScale: number;
+  leading: number;
+  rise: number;
+  renderMode: number;
   lineWidth: number;
+  /**
+   * 出力に書いた文字の状態。文字を消した BT…ET では、消した文字のためだけの状態の命令（Tz など）を
+   * 書かずに飛ばすので、実際の状態とずれることがある。文字を描く前に合わせる
+   */
+  emit: EmitState;
+}
+
+const fontKey = (f: FontRef | null) => (f ? `${f.via}:${f.name}` : null);
+
+function emitStateOf(g: Omit<GState, 'emit'>): EmitState {
+  return {
+    font: fontKey(g.font), fontSize: g.fontSize, charSpacing: g.charSpacing, wordSpacing: g.wordSpacing,
+    hScale: g.hScale, leading: g.leading, rise: g.rise, renderMode: g.renderMode,
+  };
 }
 
 function initialGState(ctm: Matrix): GState {
-  return { ctm, font: null, fontSize: 0, charSpacing: 0, wordSpacing: 0, hScale: 1, leading: 0, rise: 0, lineWidth: 1 };
+  const g = { ctm, font: null, fontSize: 0, charSpacing: 0, wordSpacing: 0, hScale: 1, leading: 0, rise: 0, renderMode: 0, lineWidth: 1 };
+  return { ...g, emit: emitStateOf(g) };
 }
+
+const copyGState = (g: GState): GState => ({ ...g, emit: { ...g.emit } });
 
 const num = (o: Operand | undefined): number => (o?.type === 'number' ? o.value : 0);
 const numberOp = (value: number): Operand => ({ type: 'number', value });
@@ -109,6 +146,16 @@ export async function redactOperations(
   const out: Operation[] = [];
   let changed = false;
   let gs: GState = { ...initialGState(initialCtm), ...inherited, ctm: initialCtm };
+  gs.emit = inherited?.emit ? { ...inherited.emit } : emitStateOf(gs);
+  /** 文字を消した BT…ET の中で、残る文字を絶対位置で置き直している */
+  let rewriting = false;
+  /** 出力の側の文字の位置が、実際とずれている（次に描く前に Tm を置く） */
+  let needTm = false;
+  /**
+   * まだ出していない文字の状態・位置の命令。次の文字を残すと決まったら出し、消すと決まったら捨てる
+   * （消す文字のためだけの Tz や Td を出力に残さないため）
+   */
+  let pendingText: (Operation & { leadingUsed?: number })[] = [];
   const stack: GState[] = [];
   let tm: Matrix = IDENTITY;
   let tlm: Matrix = IDENTITY;
@@ -146,8 +193,83 @@ export async function redactOperations(
 
   const setFont = (name: string, size: number) => {
     const f = resources.lookup('Font', name);
-    gs.font = f instanceof PDFDict ? { dict: f, name } : null;
+    gs.font = f instanceof PDFDict ? { dict: f, name, via: 'Tf' } : null;
     gs.fontSize = size;
+  };
+
+  const n = (value: number): Operand => numberOp(value);
+
+  /** 出力の側の文字の状態を、実際の状態に合わせる命令を書く */
+  const syncState = (opts: { leadingOnly?: boolean } = {}) => {
+    const e = gs.emit;
+    if (!opts.leadingOnly) {
+      const key = fontKey(gs.font);
+      if (gs.font && (key !== e.font || gs.fontSize !== e.fontSize)) {
+        if (gs.font.via === 'Tf') out.push({ op: 'Tf', operands: [{ type: 'name', value: gs.font.name }, n(gs.fontSize)] });
+        else out.push({ op: 'gs', operands: [{ type: 'name', value: gs.font.name }] });
+        e.font = key;
+        e.fontSize = gs.fontSize;
+      }
+      if (gs.charSpacing !== e.charSpacing) out.push({ op: 'Tc', operands: [n(gs.charSpacing)] });
+      if (gs.wordSpacing !== e.wordSpacing) out.push({ op: 'Tw', operands: [n(gs.wordSpacing)] });
+      if (gs.hScale !== e.hScale) out.push({ op: 'Tz', operands: [n(gs.hScale * 100)] });
+      if (gs.rise !== e.rise) out.push({ op: 'Ts', operands: [n(gs.rise)] });
+      if (gs.renderMode !== e.renderMode) out.push({ op: 'Tr', operands: [n(gs.renderMode)] });
+      Object.assign(e, { charSpacing: gs.charSpacing, wordSpacing: gs.wordSpacing, hScale: gs.hScale, rise: gs.rise, renderMode: gs.renderMode });
+    }
+    if (gs.leading !== e.leading) {
+      out.push({ op: 'TL', operands: [n(gs.leading)] });
+      e.leading = gs.leading;
+    }
+  };
+
+  /** 文字の状態の命令: 実際の状態に反映し、出すのは後（flushPending）に回す */
+  const stateOp = (o: Operation, apply: () => void) => {
+    apply();
+    if (!rewriting) pendingText.push(o);
+  };
+
+  /** 溜めた命令を出す。出力の側の状態も合わせて進める */
+  const flushPending = () => {
+    const e = gs.emit;
+    for (const p of pendingText) {
+      const a = p.operands;
+      switch (p.op) {
+        case 'Tc': e.charSpacing = num(a[0]); break;
+        case 'Tw': e.wordSpacing = num(a[0]); break;
+        case 'Tz': e.hScale = num(a[0]) / 100; break;
+        case 'TL': e.leading = num(a[0]); break;
+        case 'Ts': e.rise = num(a[0]); break;
+        case 'Tr': e.renderMode = num(a[0]); break;
+        case 'Tf':
+          if (a[0]?.type === 'name') e.font = `Tf:${a[0].value}`;
+          e.fontSize = num(a[1]);
+          break;
+        case 'TD': e.leading = -num(a[1]); break;
+        case 'T*':
+          // T* は出力の側の行送り（TL）で動くので、元の命令のときの値に合わせる
+          if (p.leadingUsed !== undefined && p.leadingUsed !== e.leading) {
+            out.push({ op: 'TL', operands: [n(p.leadingUsed)] });
+            e.leading = p.leadingUsed;
+          }
+          break;
+      }
+      out.push({ op: p.op, operands: p.operands });
+    }
+    pendingText = [];
+  };
+
+  /** 溜めた命令を捨てる。位置の命令を捨てたら、次に描く前に絶対位置を置く */
+  const discardPending = () => {
+    if (pendingText.some((p) => ['Td', 'TD', 'Tm', 'T*'].includes(p.op))) needTm = true;
+    pendingText = [];
+  };
+
+  /** 書き直しの途中で、残る文字のかたまりの前に絶対位置を置く */
+  const placeIfNeeded = () => {
+    if (!needTm) return;
+    out.push({ op: 'Tm', operands: tm.map(n) });
+    needTm = false;
   };
 
   const lineMove = (tx: number, ty: number) => {
@@ -174,8 +296,13 @@ export async function redactOperations(
     return base ? `フォント ${base}` : 'フォント';
   };
 
-  /** 文字を描く命令を処理し、範囲にかかる文字を消した命令を返す */
-  const showText = async (elements: Operand[], original: Operation): Promise<Operation[]> => {
+  /**
+   * 文字を描く命令を処理し、範囲にかかる文字を消して out に書く。
+   * 最初に文字を消したところから、その BT…ET の終わりまでは「書き直し」に入り、
+   * 残る文字のかたまりごとに絶対位置（Tm）を置く。消した文字の送りの幅や字数、
+   * 消した文字のためだけの状態（Tz など）は出力に残らない。
+   */
+  const showText = async (elements: Operand[], original: Operation): Promise<void> => {
     const model = await fontModel();
     if (!model) {
       // フォントが読めない。位置が分からないので、範囲にかかり得るなら止める
@@ -184,46 +311,86 @@ export async function redactOperations(
           `${rc.pageNumber} 頁: ${fontLabel()} の文字の幅が読めないため、墨消しの範囲にかかる文字を正確に消せません。`,
         );
       }
+      flushPending();
+      syncState();
+      if (rewriting) placeIfNeeded();
+      out.push(original);
       positionUncertain = true;
-      return [original];
+      return;
     }
     const tfs = gs.fontSize;
     const th = gs.hScale;
-    const newArray: Operand[] = [];
-    let removedAny = false;
-    let pendingAdjust = 0;
+    /** 書き直しに入る前の、元の位置のまま出す部分 */
+    let prefix: Operand[] = [];
+    /** 書き直しの途中の、残る文字のかたまり */
+    let run: Operand[] = [];
+    let runStarted = false;
 
-    const pushAdjust = (n: number) => {
-      if (n === 0) return;
-      const last = newArray[newArray.length - 1];
-      if (last?.type === 'number') last.value += n;
-      else newArray.push(numberOp(n));
+    const pushInto = (arr: Operand[], o: Operand) => {
+      const last = arr[arr.length - 1];
+      if (o.type === 'number' && last?.type === 'number') last.value += o.value;
+      else arr.push(o);
+    };
+    const flushRun = () => {
+      // かたまりの末尾の数値（次の文字までの移動）は、次の Tm が置き直すので出さない
+      while (run.length > 0 && run[run.length - 1].type === 'number') run.pop();
+      if (run.some((x) => x.type === 'string')) out.push({ op: 'TJ', operands: [{ type: 'array', items: run }] });
+      run = [];
+      runStarted = false;
+    };
+    const flushPrefix = () => {
+      while (prefix.length > 0 && prefix[prefix.length - 1].type === 'number') prefix.pop();
+      if (prefix.some((x) => x.type === 'string')) out.push({ op: 'TJ', operands: [{ type: 'array', items: prefix }] });
+      prefix = [];
+    };
+    const startRewriting = () => {
+      // この命令でまだ何も残していなければ、溜めた状態・位置の命令は消す文字のためのものなので捨てる
+      if (!prefix.some((x) => x.type === 'string')) discardPending();
+      flushPrefix();
+      rewriting = true;
+      needTm = true;
+    };
+    const keep = (bytes: number[], hex: boolean) => {
+      if (rewriting) {
+        if (!runStarted) {
+          syncState();
+          placeIfNeeded();
+          runStarted = true;
+        }
+        const last = run[run.length - 1];
+        if (last?.type === 'string' && last.hex === hex) last.bytes = Uint8Array.from([...last.bytes, ...bytes]);
+        else run.push({ type: 'string', bytes: Uint8Array.from(bytes), hex });
+      } else {
+        if (!prefix.some((x) => x.type === 'string')) {
+          // 残す文字が出る: 溜めた命令を出してから、元の位置のまま描く（TJ の先頭の数値は、その後ろに置く）
+          const leading = prefix;
+          prefix = [];
+          flushPending();
+          syncState();
+          prefix = leading;
+        }
+        const last = prefix[prefix.length - 1];
+        if (last?.type === 'string' && last.hex === hex) last.bytes = Uint8Array.from([...last.bytes, ...bytes]);
+        else prefix.push({ type: 'string', bytes: Uint8Array.from(bytes), hex });
+      }
     };
 
+    let removedAny = false;
     for (const el of elements) {
       if (el.type === 'number') {
         // TJ の数値: 1/1000 em 単位で、正なら左（縦書きなら上）へ戻る
         if (model.vertical) tm = multiply([1, 0, 0, 1, 0, (-el.value / 1000) * tfs], tm);
         else tm = multiply([1, 0, 0, 1, (-el.value / 1000) * tfs * th, 0], tm);
-        pushAdjust(el.value);
+        if (rewriting) {
+          if (runStarted) pushInto(run, numberOp(el.value));
+          else needTm = true;
+        } else {
+          pushInto(prefix, numberOp(el.value));
+        }
         continue;
       }
       if (el.type !== 'string') continue;
-      const codes = model.split(el.bytes);
-      let keptStart = -1;
-      let keptBytes: number[] = [];
-      const flushKept = () => {
-        if (keptBytes.length > 0) {
-          if (pendingAdjust !== 0) {
-            pushAdjust(pendingAdjust);
-            pendingAdjust = 0;
-          }
-          newArray.push({ type: 'string', bytes: Uint8Array.from(keptBytes), hex: el.hex });
-          keptBytes = [];
-        }
-        keptStart = -1;
-      };
-      for (const c of codes) {
+      for (const c of model.split(el.bytes)) {
         if (!model.widthKnown(c)) positionUncertain = true;
         let remove = false;
         if (positionUncertain) {
@@ -234,43 +401,36 @@ export async function redactOperations(
           }
         } else {
           const [x0, y0, x1, y1] = model.box(c);
-          const quad = transformBox(textRenderingMatrix(), x0, y0, x1, y1);
-          remove = overlapsAny(quad);
-        }
-        const adv = model.advance(c);
-        const spacing = gs.charSpacing + (model.isWordSpace(c) ? gs.wordSpacing : 0);
-        if (model.vertical) {
-          const ty = adv * tfs + spacing;
-          tm = multiply([1, 0, 0, 1, 0, ty], tm);
-          if (remove) {
-            if (tfs === 0) throw new RedactionError(`${rc.pageNumber} 頁: 大きさ 0 の文字を消せません。`);
-            flushKept();
-            pendingAdjust += (-ty * 1000) / tfs;
-          }
-        } else {
-          const tx = (adv * tfs + spacing) * th;
-          tm = multiply([1, 0, 0, 1, tx, 0], tm);
-          if (remove) {
-            if (tfs * th === 0) throw new RedactionError(`${rc.pageNumber} 頁: 大きさ 0 の文字を消せません。`);
-            flushKept();
-            pendingAdjust += (-tx * 1000) / (tfs * th);
-          }
+          remove = overlapsAny(transformBox(textRenderingMatrix(), x0, y0, x1, y1));
         }
         if (remove) {
+          if (!rewriting) startRewriting();
+          else flushRun();
+          needTm = true;
           removedAny = true;
           rc.stats.glyphsRemoved++;
         } else {
-          if (keptStart < 0) keptStart = c.start;
-          for (let i = 0; i < c.length; i++) keptBytes.push(el.bytes[c.start + i]);
+          keep(Array.from(el.bytes.subarray(c.start, c.start + c.length)), el.hex);
         }
+        const adv = model.advance(c);
+        const spacing = gs.charSpacing + (model.isWordSpace(c) ? gs.wordSpacing : 0);
+        if (model.vertical) tm = multiply([1, 0, 0, 1, 0, adv * tfs + spacing], tm);
+        else tm = multiply([1, 0, 0, 1, (adv * tfs + spacing) * th, 0], tm);
       }
-      flushKept();
     }
-    if (!removedAny) return [original];
-    pushAdjust(pendingAdjust);
-    markTouched();
-    changed = true;
-    return [{ op: 'TJ', operands: [{ type: 'array', items: newArray }] }];
+    if (!removedAny && !rewriting) {
+      // 何も消さなかった: 元の命令をそのまま出す
+      flushPending();
+      syncState();
+      out.push(original);
+      return;
+    }
+    if (rewriting) flushRun();
+    flushPrefix();
+    if (removedAny) {
+      markTouched();
+      changed = true;
+    }
   };
 
   const finishPath = (paint: Operation): Operation[] => {
@@ -416,9 +576,12 @@ export async function redactOperations(
       clipOp = null;
     }
 
+    // 文字の状態を読み書きする命令の前では、溜めた命令を先に出す（順番を保つ）
+    if (['q', 'Q', 'gs', 'Do', 'BI', 'EI', 'd0', 'd1'].includes(o.op)) flushPending();
+
     switch (o.op) {
       case 'q':
-        stack.push({ ...gs });
+        stack.push(copyGState(gs));
         out.push(o);
         break;
       case 'Q':
@@ -445,8 +608,11 @@ export async function redactOperations(
               const fd = resolve(rc.ctx, fontArr.get(0));
               const size = numbersOf(rc.ctx, fontArr)[1];
               if (fd instanceof PDFDict) {
-                gs.font = { dict: fd, name: '(ExtGState)' };
+                gs.font = { dict: fd, name: n.value, via: 'gs' };
                 gs.fontSize = Number.isFinite(size) ? size : gs.fontSize;
+                // gs は書き直しの途中でも出すので、出力の側のフォントも変わる
+                gs.emit.font = fontKey(gs.font);
+                gs.emit.fontSize = gs.fontSize;
               }
             }
           }
@@ -458,64 +624,71 @@ export async function redactOperations(
         tm = IDENTITY;
         tlm = IDENTITY;
         positionUncertain = false;
+        rewriting = false;
+        needTm = false;
         out.push(o);
         break;
       case 'ET':
+        // 最後の文字の後の状態・位置の命令は、描く文字が無いので出さない（後で要れば syncState で合わせる）
+        pendingText = [];
+        rewriting = false;
+        needTm = false;
         out.push(o);
         break;
-      case 'Tc': gs.charSpacing = num(operands[0]); out.push(o); break;
-      case 'Tw': gs.wordSpacing = num(operands[0]); out.push(o); break;
-      case 'Tz': gs.hScale = num(operands[0]) / 100; out.push(o); break;
-      case 'TL': gs.leading = num(operands[0]); out.push(o); break;
-      case 'Ts': gs.rise = num(operands[0]); out.push(o); break;
+      case 'Tc': stateOp(o, () => { gs.charSpacing = num(operands[0]); }); break;
+      case 'Tw': stateOp(o, () => { gs.wordSpacing = num(operands[0]); }); break;
+      case 'Tz': stateOp(o, () => { gs.hScale = num(operands[0]) / 100; }); break;
+      case 'TL': stateOp(o, () => { gs.leading = num(operands[0]); }); break;
+      case 'Ts': stateOp(o, () => { gs.rise = num(operands[0]); }); break;
+      case 'Tr': stateOp(o, () => { gs.renderMode = num(operands[0]); }); break;
       case 'Tf':
-        if (operands[0]?.type === 'name') setFont(operands[0].value, num(operands[1]));
-        out.push(o);
+        stateOp(o, () => {
+          if (operands[0]?.type === 'name') setFont(operands[0].value, num(operands[1]));
+        });
         break;
       case 'Td':
-        lineMove(num(operands[0]), num(operands[1]));
-        out.push(o);
-        break;
       case 'TD':
-        gs.leading = -num(operands[1]);
-        lineMove(num(operands[0]), num(operands[1]));
-        out.push(o);
-        break;
       case 'Tm':
-        tlm = operands.slice(0, 6).map(num) as Matrix;
-        tm = tlm;
-        positionUncertain = false;
-        out.push(o);
+      case 'T*': {
+        if (o.op === 'TD') gs.leading = -num(operands[1]);
+        if (o.op === 'Td' || o.op === 'TD') lineMove(num(operands[0]), num(operands[1]));
+        else if (o.op === 'T*') lineMove(0, -gs.leading);
+        else {
+          tlm = operands.slice(0, 6).map(num) as Matrix;
+          tm = tlm;
+          positionUncertain = false;
+        }
+        if (rewriting) {
+          // 書き直しの途中: 相対の移動は出さず、次に描く前に絶対位置を置く
+          needTm = true;
+        } else {
+          pendingText.push(o.op === 'T*' ? { ...o, leadingUsed: gs.leading } : o);
+        }
         break;
-      case 'T*':
-        lineMove(0, -gs.leading);
-        out.push(o);
-        break;
+      }
       case 'Tj':
-        out.push(...(await showText(operands.slice(0, 1), o)));
+        await showText(operands.slice(0, 1), o);
         break;
       case 'TJ': {
         const arr = operands[0];
-        out.push(...(await showText(arr?.type === 'array' ? arr.items : [], o)));
+        await showText(arr?.type === 'array' ? arr.items : [], o);
         break;
       }
-      case "'": {
-        lineMove(0, -gs.leading);
-        const shown = await showText(operands.slice(0, 1), { op: 'Tj', operands: operands.slice(0, 1) });
-        out.push({ op: 'T*', operands: [] }, ...shown);
-        break;
-      }
+      case "'":
       case '"': {
-        gs.wordSpacing = num(operands[0]);
-        gs.charSpacing = num(operands[1]);
+        if (o.op === '"') {
+          gs.wordSpacing = num(operands[0]);
+          gs.charSpacing = num(operands[1]);
+        }
         lineMove(0, -gs.leading);
-        const shown = await showText(operands.slice(2, 3), { op: 'Tj', operands: operands.slice(2, 3) });
-        out.push(
-          { op: 'Tw', operands: [operands[0]] },
-          { op: 'Tc', operands: [operands[1]] },
-          { op: 'T*', operands: [] },
-          ...shown,
-        );
+        const str = o.op === '"' ? operands.slice(2, 3) : operands.slice(0, 1);
+        if (rewriting) {
+          needTm = true;
+        } else {
+          // ' と " は、行送り（T*）と状態の設定に分けて溜める（中で書き直しに入ることがあるため）
+          pendingText.push({ op: 'T*', operands: [], leadingUsed: gs.leading });
+        }
+        await showText(str, { op: 'Tj', operands: str });
         break;
       }
       case 'BDC':
@@ -698,6 +871,11 @@ function stripMarkedContentText(rc: RedactionContext, op: Operation, resources: 
   const keys = new Set(['ActualText', 'Alt', 'E']);
   if (props?.type === 'dict') {
     props.entries = props.entries.filter(([k]) => !keys.has(k));
+    // 属性が空になったら、属性の無い BMC にする（「ここに ActualText があった」という殻も残さない）
+    if (props.entries.length === 0) {
+      op.op = 'BMC';
+      op.operands = op.operands.slice(0, 1);
+    }
     return;
   }
   if (props?.type === 'name') {
