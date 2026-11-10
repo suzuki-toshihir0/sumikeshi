@@ -79,8 +79,9 @@ export function mergeRects(rects: PdfRect[]): PdfRect[] {
         const minW = Math.min(a.width, b.width);
         // 横に並ぶ（同じ行）: 縦の重なりが高さの半分以上で、横の隙間が高さの 0.6 倍以下
         const sameLine = vOverlap >= minH * 0.5 && -hOverlap <= minH * 0.6;
-        // 縦に並ぶ（同じ列）: 横の重なりが幅の半分以上で、縦の隙間が幅の 0.6 倍以下
-        const sameColumn = hOverlap >= minW * 0.5 && -vOverlap <= minW * 0.6;
+        // 縦に並ぶ（同じ列。縦書きの字）: 横の重なりが幅の半分以上で、縦の隙間が字の大きさ（幅と高さの小さいほう）の 0.6 倍以下。
+        // 幅で測ると、横に長い行の矩形が縦に並んだとき（別の行）までまとめてしまう
+        const sameColumn = hOverlap >= minW * 0.5 && -vOverlap <= Math.min(minW, minH) * 0.6;
         // 面積を持って重なる
         const intersect = vOverlap > 0 && hOverlap > 0;
         if (sameLine || sameColumn || intersect) {
