@@ -243,7 +243,7 @@ function buildFormat0(pairs: [number, number][]): Uint8Array {
   return w.done();
 }
 
-function rebuildCmap(cmap: Uint8Array, keep: (gid: number) => boolean): Uint8Array {
+function rebuildCmap(cmap: Uint8Array, keep: (gid: number) => boolean, remap: (gid: number) => number = (g) => g): Uint8Array {
   const n = u16(cmap, 2);
   const subs: { pid: number; eid: number; data: Uint8Array }[] = [];
   const cache = new Map<number, Uint8Array>();
@@ -256,7 +256,7 @@ function rebuildCmap(cmap: Uint8Array, keep: (gid: number) => boolean): Uint8Arr
     if (!data) {
       const pairs = enumerateCmap(cmap, off);
       if (!pairs) continue; // 読めない形式の表は捨てる
-      const kept = pairs.filter(([, g]) => keep(g));
+      const kept = pairs.filter(([, g]) => keep(g)).map(([c, g]) => [c, remap(g)] as [number, number]);
       const fmt = u16(cmap, off);
       if (fmt === 0) data = buildFormat0(kept);
       else if (kept.some(([c]) => c > 0xfffe) || fmt === 12) data = buildFormat12(kept);
@@ -424,4 +424,150 @@ export function scrubTrueType(font: Uint8Array, dropGids: Set<number>): { font: 
   for (const t of [...tables.keys()]) if (DROP_TABLES.has(t)) tables.delete(t);
 
   return { font: writeFont(tables, u32(font, 0)), dropped: drop };
+}
+
+/** 合成字形の部品の番号を書き換えた写し */
+function remapComponents(glyph: Uint8Array, map: Map<number, number>): Uint8Array {
+  if (glyph.length < 10 || i16(glyph, 0) >= 0) return glyph;
+  const out = glyph.slice();
+  let p = 10;
+  for (let guard = 0; guard < 256 && p + 4 <= out.length; guard++) {
+    const flags = u16(out, p);
+    const g = u16(out, p + 2);
+    const ng = map.get(g) ?? 0;
+    out[p + 2] = (ng >> 8) & 0xff;
+    out[p + 3] = ng & 0xff;
+    p += 4;
+    p += flags & 0x0001 ? 4 : 2;
+    if (flags & 0x0008) p += 2;
+    else if (flags & 0x0040) p += 4;
+    else if (flags & 0x0080) p += 8;
+    if (!(flags & 0x0020)) break;
+  }
+  return out;
+}
+
+/**
+ * 指定した字形を番号ごと取り除き、残る字形の番号を詰め直した TrueType を返す。
+ * 部分集合のフォントは使う字形だけを詰めて番号を振るので、字形を空にするだけだと「空の番号」が穴として残り、
+ * 前後の残る字形から、元のフォントの字形の順で消した字の範囲が分かってしまう。
+ * 返り値の map は、古い番号 → 新しい番号（残る字形だけ）。
+ */
+export function compactTrueType(font: Uint8Array, dropGids: Set<number>): { font: Uint8Array; map: Map<number, number>; dropped: Set<number> } {
+  const tables = readTables(font);
+  const head = tables.get('head');
+  const maxp = tables.get('maxp');
+  const loca = tables.get('loca');
+  const glyf = tables.get('glyf');
+  if (!head || !maxp || !loca || !glyf) throw new TrueTypeScrubError('head・maxp・loca・glyf のどれかが無い');
+  const numGlyphs = u16(maxp, 4);
+  const longLoca = i16(head, 50) === 1;
+  const glyphs: Uint8Array[] = [];
+  for (let g = 0; g < numGlyphs; g++) {
+    const s = longLoca ? u32(loca, g * 4) : u16(loca, g * 2) * 2;
+    const e = longLoca ? u32(loca, (g + 1) * 4) : u16(loca, (g + 1) * 2) * 2;
+    glyphs.push(e > s && e <= glyf.length ? glyf.slice(s, e) : new Uint8Array(0));
+  }
+  const drop = new Set([...dropGids].filter((g) => g > 0 && g < numGlyphs));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let g = 0; g < glyphs.length; g++) {
+      if (drop.has(g)) continue;
+      for (const c of components(glyphs[g])) if (drop.delete(c)) changed = true;
+    }
+  }
+  const map = new Map<number, number>();
+  for (let g = 0; g < numGlyphs; g++) if (!drop.has(g)) map.set(g, map.size);
+  const kept = [...map.keys()];
+
+  const newGlyf = new Writer();
+  const newLoca = new Writer();
+  for (const g of kept) {
+    newLoca.u32(newGlyf.length);
+    newGlyf.bytes(remapComponents(glyphs[g], map));
+    while (newGlyf.length % 4) newGlyf.u8(0);
+  }
+  newLoca.u32(newGlyf.length);
+  tables.set('glyf', newGlyf.done());
+  tables.set('loca', newLoca.done());
+  const h = head.slice();
+  h[50] = 0;
+  h[51] = 1;
+  tables.set('head', h);
+  const m = maxp.slice();
+  m[4] = (kept.length >> 8) & 0xff;
+  m[5] = kept.length & 0xff;
+  tables.set('maxp', m);
+
+  const rebuildMetrics = (mtxTag: string, heaTag: string) => {
+    const mtx = tables.get(mtxTag);
+    const hea = tables.get(heaTag);
+    if (!mtx || !hea) return;
+    const numLong = u16(hea, 34);
+    const w = new Writer();
+    for (const g of kept) {
+      const li = Math.min(g, numLong - 1);
+      const adv = li >= 0 && li * 4 + 1 < mtx.length ? u16(mtx, li * 4) : 0;
+      const side = g < numLong ? (g * 4 + 3 < mtx.length ? i16(mtx, g * 4 + 2) : 0)
+        : (numLong * 4 + (g - numLong) * 2 + 1 < mtx.length ? i16(mtx, numLong * 4 + (g - numLong) * 2) : 0);
+      w.u16(adv);
+      w.i16(side);
+    }
+    tables.set(mtxTag, w.done());
+    const nh = hea.slice();
+    nh[34] = (kept.length >> 8) & 0xff;
+    nh[35] = kept.length & 0xff;
+    tables.set(heaTag, nh);
+  };
+  rebuildMetrics('hmtx', 'hhea');
+  rebuildMetrics('vmtx', 'vhea');
+
+  const cmap = tables.get('cmap');
+  if (cmap) tables.set('cmap', rebuildCmap(cmap, (g) => map.has(g), (g) => map.get(g)!));
+  const post = tables.get('post');
+  if (post) tables.set('post', compactPost(post, numGlyphs, kept));
+  for (const t of [...tables.keys()]) if (DROP_TABLES.has(t)) tables.delete(t);
+  return { font: writeFont(tables, u32(font, 0)), map, dropped: drop };
+}
+
+/** post の形式 2 を、残る字形の順に作り直す */
+function compactPost(post: Uint8Array, numGlyphs: number, kept: number[]): Uint8Array {
+  const version = u32(post, 0);
+  if (version !== 0x00020000) {
+    if (version === 0x00025000) {
+      const out = post.slice(0, 32);
+      out.set([0, 3, 0, 0], 0);
+      return out;
+    }
+    return post;
+  }
+  const n = Math.min(u16(post, 32), numGlyphs);
+  const index: number[] = [];
+  for (let g = 0; g < n; g++) index.push(u16(post, 34 + g * 2));
+  const names: Uint8Array[] = [];
+  let p = 34 + u16(post, 32) * 2;
+  while (p < post.length) {
+    const len = post[p];
+    names.push(post.slice(p, p + 1 + len));
+    p += 1 + len;
+  }
+  const newNames: Uint8Array[] = [];
+  const remap = new Map<number, number>();
+  const newIndex = kept.map((g) => {
+    const ix = index[g] ?? 0;
+    if (ix < 258) return ix;
+    const old = ix - 258;
+    if (!remap.has(old)) {
+      remap.set(old, 258 + newNames.length);
+      newNames.push(names[old] ?? Uint8Array.of(0));
+    }
+    return remap.get(old)!;
+  });
+  const w = new Writer();
+  w.bytes(post.slice(0, 32));
+  w.u16(kept.length);
+  for (const ix of newIndex) w.u16(ix);
+  for (const nm of newNames) w.bytes(nm);
+  return w.done();
 }

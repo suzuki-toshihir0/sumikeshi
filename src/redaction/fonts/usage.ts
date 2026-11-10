@@ -157,7 +157,7 @@ export async function collectFontUsage(
  * 文書全体で、指定したフォントで描く文字列の符号を書き換える（Type3 の符号を詰め直したとき）。
  * 頁の中身、Do で描く Form、注釈の外観、Type3 の字形の手続きを書き換えたストリームに差し替える。
  */
-export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, Map<number, number>>): Promise<void> {
+export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { map: Map<number, number>; bytes: number }>): Promise<void> {
   const ctx = doc.context;
   const done = new Set<PDFStream>();
   const lookup = (resources: PDFDict | undefined, category: string, name: string): PDFObject | undefined => {
@@ -182,7 +182,15 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, Map<
       const m = maps.get(font);
       if (!m) return o;
       changed = true;
-      return { type: 'string', hex: true, bytes: Uint8Array.from(o.bytes, (b) => m.get(b) ?? b) };
+      if (m.bytes === 1) return { type: 'string', hex: true, bytes: Uint8Array.from(o.bytes, (b) => m.map.get(b) ?? b) };
+      // 2 バイトの符号（Identity-H / V）
+      const outBytes: number[] = [];
+      for (let i = 0; i + 1 < o.bytes.length; i += 2) {
+        const c = (o.bytes[i] << 8) | o.bytes[i + 1];
+        const nc = m.map.get(c) ?? c;
+        outBytes.push((nc >> 8) & 0xff, nc & 0xff);
+      }
+      return { type: 'string', hex: true, bytes: Uint8Array.from(outBytes) };
     };
     for (const o of ops) {
       const a = o.operands;

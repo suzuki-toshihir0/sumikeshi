@@ -845,6 +845,86 @@ describe('消したものの痕跡（番号・名前・符号の穴）', () => {
   });
 });
 
+/** 出力の中の、TrueType として読めるストリームをすべて読む */
+async function trueTypesIn(pdf: Uint8Array) {
+  const { parseTrueType } = await import('../../src/redaction/fonts/truetype');
+  const doc = await PDFDocument.load(pdf);
+  const out = [];
+  for (const [, o] of doc.context.enumerateIndirectObjects()) {
+    if (!(o instanceof PDFRawStream)) continue;
+    try {
+      out.push(parseTrueType(decodePDFRawStream(o).decode()));
+    } catch {
+      // TrueType でない
+    }
+  }
+  return out;
+}
+
+const BOX_A: [number, number, number, number] = [11, 0, 511, 701];
+const BOX_B: [number, number, number, number] = [12, 0, 512, 702];
+const BOX_C: [number, number, number, number] = [13, 0, 513, 703];
+const BOX_D: [number, number, number, number] = [14, 0, 514, 704];
+
+describe('TrueType の字形の穴を残さない', () => {
+  it('Type0（Identity-H）: 消した字形を番号ごと取り除いて詰め、文字列の符号も書き換える', async () => {
+    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C, BOX_D]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <000100020004> Tj ET BT /F1 12 Tf 50 600 Td <0003> Tj ET', (doc, page) => {
+      const fontFile = doc.context.register(doc.context.flateStream(ttf));
+      const toUnicode = doc.context.register(doc.context.stream(`/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+1 begincodespacerange <0000> <FFFF> endcodespacerange
+4 beginbfchar <0001> <0041> <0002> <0042> <0003> <0043> <0004> <0044> endbfchar endcmap end end`));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type0', BaseFont: 'Tiny', Encoding: 'Identity-H', ToUnicode: toUnicode,
+        DescendantFonts: [doc.context.obj({
+          Type: 'Font', Subtype: 'CIDFontType2', BaseFont: 'Tiny', CIDToGIDMap: 'Identity',
+          CIDSystemInfo: { Registry: PDFString.of('Adobe'), Ordering: PDFString.of('Identity'), Supplement: 0 },
+          FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'Tiny', Flags: 4, Ascent: 800, Descent: -200, FontBBox: [0, -200, 600, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile2: fontFile }),
+          DW: 1000, W: [1, [601, 602, 603, 604]],
+        })],
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    const pb = await extractText(before);
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const tts = await trueTypesIn(after);
+    expect(tts).toHaveLength(1);
+    const tt = tts[0];
+    // .notdef と A, B, D の 4 つに詰まり、C の字形はどこにも無い
+    expect(tt.numGlyphs).toBe(4);
+    expect([1, 2, 3].map((g) => tt.glyphBox(g))).toEqual([BOX_A, BOX_B, BOX_D]);
+    expect(await findEverywhere(after, '603')).toEqual([]);
+    const pa = await extractText(after);
+    expect(pa.map((t) => t.str).join('').replace(/\s/g, '')).toBe('ABD');
+    const x = (items: typeof pa) => items.find((t) => t.str.includes('A'))!.box;
+    expect(x(pa).x).toBeCloseTo(x(pb).x, 3);
+    expect(x(pa).width).toBeCloseTo(x(pb).width, 3);
+  });
+
+  it('単純な TrueType: 消した字形を番号ごと取り除き、cmap も詰めた番号に書き換える', async () => {
+    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C, BOX_D], 1000, [[0x41, 1], [0x42, 2], [0x43, 3], [0x44, 4]]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td (ABD) Tj ET BT /F1 12 Tf 50 600 Td (C) Tj ET', (doc, page) => {
+      const fontFile = doc.context.register(doc.context.flateStream(ttf));
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'TrueType', BaseFont: 'ABCDEF+Tiny', FirstChar: 65, LastChar: 68, Widths: [600, 600, 600, 600],
+        Encoding: 'WinAnsiEncoding',
+        FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'ABCDEF+Tiny', Flags: 32, Ascent: 800, Descent: -200, FontBBox: [0, -200, 600, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile2: fontFile }),
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const tts = await trueTypesIn(after);
+    expect(tts).toHaveLength(1);
+    const tt = tts[0];
+    expect(tt.numGlyphs).toBe(4);
+    const c31 = tt.cmaps.get('3,1')!;
+    expect(c31(0x43)).toBeUndefined();
+    expect(tt.glyphBox(c31(0x44)!)).toEqual(BOX_D);
+    expect(tt.glyphBox(c31(0x41)!)).toEqual(BOX_A);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ABD');
+  });
+});
+
 describe('資源の後始末', () => {
   it('資源に名前で置いた ActualText は、写しに差し替えた後、元が残らない', async () => {
     const before = await rawPage('/Span /P1 BDC BT /F1 12 Tf 50 700 Td (xxxx) Tj ET EMC BT /F1 12 Tf 50 600 Td (public) Tj ET', async (doc, page) => {

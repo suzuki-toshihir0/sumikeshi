@@ -15,7 +15,7 @@ import { parseContentStream } from '../content/lexer';
 import { createFontModel, glyphNames, parseW, parseW2, type FontModel } from './font-model';
 import { collectFontUsage, rewriteFontCodes } from './usage';
 import { parseTrueType, simpleTrueTypeGid, type TrueTypeInfo } from './truetype';
-import { scrubTrueType } from './truetype-scrub';
+import { compactTrueType } from './truetype-scrub';
 import type { CMapLoader } from './cmap';
 import { STANDARD_FONT_ALIASES } from '../vendor/pdfjs-encodings';
 
@@ -152,17 +152,19 @@ function cleanDescriptor(descriptor: PDFDict | undefined): void {
 }
 
 /**
- * TrueType から字形を消して入れ直す。書き換えられない（壊れている、コレクションなど）ときは、
- * フォントのデータごと外す（ビューアーは代わりのフォントで描く）
+ * TrueType から字形を番号ごと取り除き、残る字形の番号を詰め直して入れ直す。古い番号 → 新しい番号を返す。
+ * 書き換えられない（壊れている、コレクションなど）ときは、フォントのデータごと外して null を返す
  */
-function scrubFontFile2(ctx: PDFContext, descriptor: PDFDict, bytes: Uint8Array, dropGids: Set<number>, stats: FontScrubStats): void {
+function compactFontFile2(ctx: PDFContext, descriptor: PDFDict, bytes: Uint8Array, dropGids: Set<number>, stats: FontScrubStats): Map<number, number> | null {
   try {
-    const r = scrubTrueType(bytes, dropGids);
+    const r = compactTrueType(bytes, dropGids);
     replaceFontFile2(ctx, descriptor, r.font);
     stats.glyphsScrubbed += r.dropped.size;
+    return r.map;
   } catch {
     descriptor.delete(PDFName.of('FontFile2'));
     stats.fontsUnembedded++;
+    return null;
   }
 }
 
@@ -319,7 +321,8 @@ function scrubSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Se
         descriptor.delete(PDFName.of('FontFile2'));
         stats.fontsUnembedded++;
       } else if (dropGids.size > 0) {
-        scrubFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
+        // 単純なフォントの符号は文字そのもの。字形の番号の付け替えは、フォントの cmap の中で済む
+        compactFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
       }
     } else {
       unembed(ctx, descriptor, stats);
@@ -411,10 +414,10 @@ function recodeType3(ctx: PDFContext, font: PDFDict, used: Set<number>): Map<num
 
 async function scrubComposite(
   ctx: PDFContext, font: PDFDict, model: FontModel, drop: Set<number>, used: Set<number>, stats: FontScrubStats,
-): Promise<void> {
+): Promise<Map<number, number> | null> {
   const descendants = getArray(ctx, font, 'DescendantFonts');
   const cidFont = descendants ? resolve(ctx, descendants.get(0)) : undefined;
-  if (!(cidFont instanceof PDFDict) || !model.cidOf) return;
+  if (!(cidFont instanceof PDFDict) || !model.cidOf) return null;
   const usedCids = new Set([...used].map((c) => model.cidOf!(c)));
   const dropCids = new Set([...drop].map((c) => model.cidOf!(c)).filter((c) => !usedCids.has(c)));
   const descriptor = getDict(ctx, cidFont, 'FontDescriptor');
@@ -476,6 +479,7 @@ async function scrubComposite(
   }
 
   // 字形
+  let codeRemap: Map<number, number> | null = null;
   if (getName(ctx, cidFont, 'Subtype') === 'CIDFontType2') {
     const tt = loadTrueType(ctx, descriptor);
     if (tt && descriptor) {
@@ -487,7 +491,47 @@ async function scrubComposite(
       }
       const usedGids = new Set([...usedCids].map(toGid));
       const dropGids = new Set([...dropCids].map(toGid).filter((g) => !usedGids.has(g)));
-      if (dropGids.size > 0) scrubFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
+      if (dropGids.size > 0) {
+        const gidMap = compactFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
+        if (gidMap) {
+          const encName = enc instanceof PDFName ? enc.decodeText() : undefined;
+          const identity = !(mapObj instanceof PDFStream) && (encName === 'Identity-H' || encName === 'Identity-V');
+          if (identity) {
+            // 符号 = CID = 字形の番号。字形の番号を詰めたので、符号（CID）も同じく詰め直す（符号の穴も残さない）
+            codeRemap = new Map();
+            for (const c of used) {
+              const ng = gidMap.get(c);
+              if (ng !== undefined) codeRemap.set(c, ng);
+            }
+            const w = parseW(ctx, getArray(ctx, cidFont, 'W'));
+            const nw: PDFObject[] = [];
+            for (const [oc, nc] of [...codeRemap.entries()].sort((a, b) => a[1] - b[1])) {
+              const width = w.get(oc);
+              if (width !== undefined) nw.push(PDFNumber.of(nc), ctx.obj([width]));
+            }
+            cidFont.set(PDFName.of('W'), ctx.obj(nw));
+            const w2 = parseW2(ctx, getArray(ctx, cidFont, 'W2'));
+            if (w2.size > 0) {
+              const nw2: PDFObject[] = [];
+              for (const [oc, nc] of [...codeRemap.entries()].sort((a, b) => a[1] - b[1])) {
+                const v = w2.get(oc);
+                if (v) nw2.push(PDFNumber.of(nc), ctx.obj(v));
+              }
+              cidFont.set(PDFName.of('W2'), ctx.obj(nw2));
+            }
+          } else {
+            // CID はそのままにし、CID → 新しい字形の番号の表を明示する
+            const maxCid = Math.max(0, ...usedCids);
+            const table = new Uint8Array((maxCid + 1) * 2);
+            for (const cid of usedCids) {
+              const ng = gidMap.get(toGid(cid)) ?? 0;
+              table[cid * 2] = (ng >> 8) & 0xff;
+              table[cid * 2 + 1] = ng & 0xff;
+            }
+            cidFont.set(PDFName.of('CIDToGIDMap'), ctx.register(ctx.flateStream(table)));
+          }
+        }
+      }
     } else {
       unembed(ctx, descriptor, stats);
       // 読めない FontFile2 も外す
@@ -499,8 +543,14 @@ async function scrubComposite(
   } else if (dropCids.size > 0) {
     unembed(ctx, descriptor, stats);
   }
+  if (codeRemap) {
+    scrubToUnicode(ctx, font, new Set(), undefined, codeRemap);
+    cleanDescriptor(descriptor);
+    return codeRemap;
+  }
   scrubToUnicode(ctx, font, drop);
   cleanDescriptor(descriptor);
+  return null;
 }
 
 /**
@@ -517,7 +567,7 @@ export async function scrubFonts(
   if (removedCodes.size === 0) return stats;
   const ctx = doc.context;
   const usage = await collectFontUsage(doc, new Set(removedCodes.keys()), fontCache, cmapLoader);
-  const recodeMaps = new Map<PDFDict, Map<number, number>>();
+  const recodeMaps = new Map<PDFDict, { map: Map<number, number>; bytes: number }>();
   for (const [font, removed] of removedCodes) {
     const used = usage.get(font) ?? new Set<number>();
     const drop = new Set([...removed].filter((c) => !used.has(c)));
@@ -530,10 +580,13 @@ export async function scrubFonts(
       } catch {
         model = null;
       }
-      if (model) await scrubComposite(ctx, font, model, drop, used, stats);
+      if (model) {
+        const remap = await scrubComposite(ctx, font, model, drop, used, stats);
+        if (remap) recodeMaps.set(font, { map: remap, bytes: 2 });
+      }
     } else {
       scrubSimple(ctx, font, drop, used, removed, stats);
-      if (getName(ctx, font, 'Subtype') === 'Type3') recodeMaps.set(font, recodeType3(ctx, font, used));
+      if (getName(ctx, font, 'Subtype') === 'Type3') recodeMaps.set(font, { map: recodeType3(ctx, font, used), bytes: 1 });
     }
   }
   if (recodeMaps.size > 0) await rewriteFontCodes(doc, recodeMaps);
