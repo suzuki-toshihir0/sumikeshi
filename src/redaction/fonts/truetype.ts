@@ -4,8 +4,9 @@
  * PDF の文字送り（Widths / W）の箱と、実際に描かれる字形の範囲は一致するとは限らない
  * （斜体の張り出し、左にはみ出す字形、文字送りが 0 の字形など）。
  * 墨消しでは、字形の外接矩形が範囲にかかる文字も消すために使う。
- * 読むのは head・maxp・loca・glyf・cmap だけ（字形の輪郭は解釈しない）。
+ * 読むのは head・maxp・loca・glyf・cmap・post だけ（字形の輪郭は解釈しない）。
  */
+import { MacStandardGlyphOrdering } from '../vendor/pdfjs-encodings';
 
 export interface TrueTypeInfo {
   unitsPerEm: number;
@@ -14,6 +15,8 @@ export interface TrueTypeInfo {
   glyphBox(gid: number): [number, number, number, number] | null;
   /** cmap の表（platformID, encodingID）→ 符号から字形の番号を引く関数 */
   cmaps: Map<string, (code: number) => number | undefined>;
+  /** post 表（形式 2）の字形名 → 字形の番号（同じ名前が複数あれば最初のもの）。無ければ空 */
+  postNames: Map<string, number>;
 }
 
 export class TrueTypeParseError extends Error {}
@@ -94,7 +97,37 @@ export function parseTrueType(bytes: Uint8Array): TrueTypeInfo {
       // cmap が読めなくても、外接矩形は CID からも引ける
     }
   }
-  return { unitsPerEm, numGlyphs, glyphBox, cmaps };
+  const postNames = new Map<string, number>();
+  const post = tables.get('post');
+  if (post) {
+    try {
+      if (r.u32(post.offset) === 0x00020000) {
+        const n = r.u16(post.offset + 32);
+        const custom: string[] = [];
+        let p = post.offset + 34 + n * 2;
+        const end = post.offset + post.length;
+        while (p < end) {
+          const len = r.u8(p);
+          let nm = '';
+          for (let k = 1; k <= len; k++) nm += String.fromCharCode(r.u8(p + k));
+          custom.push(nm);
+          p += 1 + len;
+        }
+        for (let g = 0; g < n && g < numGlyphs; g++) {
+          const ix = r.u16(post.offset + 34 + g * 2);
+          const nm = ix < 258 ? MacStandardGlyphOrdering[ix] : custom[ix - 258];
+          if (nm && !postNames.has(nm)) postNames.set(nm, g);
+        }
+      } else if (r.u32(post.offset) === 0x00010000) {
+        MacStandardGlyphOrdering.forEach((nm, g) => {
+          if (g < numGlyphs && !postNames.has(nm)) postNames.set(nm, g);
+        });
+      }
+    } catch {
+      // 読めない post 表は使わない
+    }
+  }
+  return { unitsPerEm, numGlyphs, glyphBox, cmaps, postNames };
 }
 
 function parseCmapSubtable(r: Reader, o: number): ((code: number) => number | undefined) | null {

@@ -12,15 +12,22 @@ import { contentsBytes, get, getArray, getDict, getName, inheritedPageAttr, numb
 import { createFontModel, type FontModel } from './font-model';
 import type { CMapLoader } from './cmap';
 
+/**
+ * targets のフォントの使われ方を数える。'all' なら、文書の中で文字列を描くのに選ばれたフォントすべて。
+ */
 export async function collectFontUsage(
   doc: PDFDocument,
-  targets: Set<PDFDict>,
+  targets: Set<PDFDict> | 'all',
   fontCache: Map<PDFDict, Promise<FontModel>>,
   cmapLoader?: CMapLoader,
 ): Promise<Map<PDFDict, Set<number>>> {
   const ctx = doc.context;
   const used = new Map<PDFDict, Set<number>>();
-  for (const t of targets) used.set(t, new Set());
+  const all = targets === 'all';
+  if (targets !== 'all') for (const t of targets) used.set(t, new Set());
+  const track = (f: PDFDict | null) => {
+    if (all && f && !used.has(f)) used.set(f, new Set());
+  };
   const visited = new Set<string>();
   const type3Walked = new Set<PDFDict>();
   let visitCount = 0;
@@ -72,6 +79,7 @@ export async function collectFontUsage(
         case 'Tf': {
           const f = a[0]?.type === 'name' ? lookup(resources, 'Font', a[0].value) : undefined;
           font = f instanceof PDFDict ? f : null;
+          track(font);
           // Type3 の字形の手続きの中で使うフォントも数える（手続きは字ごとに描かれる）
           if (font && getName(ctx, font, 'Subtype') === 'Type3' && !type3Walked.has(font)) {
             type3Walked.add(font);
@@ -91,7 +99,10 @@ export async function collectFontUsage(
           if (eg instanceof PDFDict) {
             const fa = getArray(ctx, eg, 'Font');
             const f = fa ? resolve(ctx, fa.get(0)) : undefined;
-            if (f instanceof PDFDict) font = f;
+            if (f instanceof PDFDict) {
+              font = f;
+              track(font);
+            }
             const smask = get(ctx, eg, 'SMask');
             if (smask instanceof PDFDict) {
               const g = get(ctx, smask, 'G');
@@ -154,8 +165,9 @@ export async function collectFontUsage(
 }
 
 /**
- * 文書全体で、指定したフォントで描く文字列の符号を書き換える（Type3 の符号を詰め直したとき）。
- * 頁の中身、Do で描く Form、注釈の外観、Type3 の字形の手続きを書き換えたストリームに差し替える。
+ * 文書全体で、指定したフォントで描く文字列の符号を書き換える（符号を詰め直したとき）。
+ * collectFontUsage が数える場所（頁の中身、Do で描く Form、注釈の外観、Type3 の字形の手続き、
+ * タイリングパターン、ソフトマスクの Form）を、書き換えたストリームに差し替える。
  */
 export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { map: Map<number, number>; bytes: number }>): Promise<void> {
   const ctx = doc.context;
@@ -209,7 +221,16 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { ma
             const fa = getArray(ctx, eg, 'Font');
             const f = fa ? resolve(ctx, fa.get(0)) : undefined;
             if (f instanceof PDFDict) font = f;
+            const smask = get(ctx, eg, 'SMask');
+            const g = smask instanceof PDFDict ? get(ctx, smask, 'G') : undefined;
+            if (g instanceof PDFStream) await rewriteStream(g, resources, depth);
           }
+          break;
+        }
+        case 'scn': case 'SCN': {
+          const last = a[a.length - 1];
+          const pat = last?.type === 'name' ? lookup(resources, 'Pattern', last.value) : undefined;
+          if (pat instanceof PDFStream) await rewriteStream(pat, resources, depth);
           break;
         }
         case 'Tj': case "'": if (a[0]) a[0] = recodeString(a[0]); break;
