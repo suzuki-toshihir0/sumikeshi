@@ -70,7 +70,9 @@ export function applyGenericFilter(ctx: PDFContext, step: FilterStep, data: Uint
 export function decodeStreamData(ctx: PDFContext, dict: PDFDict, data: Uint8Array): Uint8Array {
   let out = data;
   for (const step of filterSteps(ctx, dict)) out = applyGenericFilter(ctx, step, out);
-  return out;
+  // 圧縮していないストリームでは元の中身そのものが返るので、写しにする（呼び出し側が画素を塗ると、
+  // ほかの頁と共有する元の画像まで書き換わってしまう）
+  return out === data ? data.slice() : out;
 }
 
 function numParam(ctx: PDFContext, params: PDFDict, key: string, def: number): number {

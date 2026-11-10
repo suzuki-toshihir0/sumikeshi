@@ -190,6 +190,26 @@ describe('画像のいろいろな形', () => {
     for (let y = 0; y < 20; y++) for (let x = 0; x < 40; x++) expect(a2[0].gray(x, y)).toBe(b2[0].gray(x, y));
   });
 
+  it('2 つの頁で共有する、圧縮していない画像: 墨消ししていない頁の画像の中身は変わらない', async () => {
+    const doc = await PDFDocument.create();
+    const px = pattern(40, 20);
+    const img = doc.context.register(doc.context.stream(px, {
+      Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+    }));
+    for (let i = 0; i < 2; i++) {
+      const page = doc.addPage([595, 842]);
+      page.node.setXObject(PDFName.of('Im0'), img);
+      page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('q 200 0 0 100 100 600 cm /Im0 Do Q')));
+    }
+    const before = await doc.save();
+    const rect = { x: 150, y: 620, width: 60, height: 40 };
+    const after = await redact(before, [rect], 1);
+    await expectImageRedacted(before, after, rect, 1);
+    const b2 = await extractImages(before, 2);
+    const a2 = await extractImages(after, 2);
+    for (let y = 0; y < 20; y++) for (let x = 0; x < 40; x++) expect(a2[0].gray(x, y)).toBe(b2[0].gray(x, y));
+  });
+
   it('JPEG 2000 の画像（色空間は画像の中だけ）', async () => {
     const before = fixture('jpx.pdf');
     const rect = { x: 148, y: 578, width: 70, height: 24 };

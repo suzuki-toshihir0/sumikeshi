@@ -25,10 +25,11 @@ function imageQuad(ctm: Matrix) {
   return transformBox(ctm, 0, 0, 1, 1);
 }
 
+/** 画像のストリームの生のバイト列の写し（元の中身そのものを返すと、塗ったときに共有する元の画像まで書き換わる） */
 function rawContents(s: PDFStream): Uint8Array {
-  if (s instanceof PDFRawStream) return s.getContents();
+  if (s instanceof PDFRawStream) return s.getContents().slice();
   const any = s as unknown as { getContents?: () => Uint8Array };
-  if (typeof any.getContents === 'function') return any.getContents();
+  if (typeof any.getContents === 'function') return any.getContents().slice();
   throw new Error('画像のデータを読めない');
 }
 
