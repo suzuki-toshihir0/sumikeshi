@@ -135,4 +135,11 @@ describe('文字選択の黒い四角を、空いているところまで広げ�
     expect(b.x + b.width).toBeGreaterThan(105);
     expect(b.x + b.width).toBeLessThan(110);
   });
+
+  it('上下の行の字が範囲の縁に少しかかるだけでも、その字は消さない（そこで止める）', async () => {
+    // 上の行（y=712）の字の箱（709.5〜）は、下の行の範囲（697〜710）の上の縁に 0.5pt だけかかる
+    const before = await page('BT /F1 12 Tf 50 700 Td (Name: Secret) Tj ET BT /F1 12 Tf 130 712 Td (tailword) Tj ET');
+    const after = await redact(before, [secretBox()]);
+    expect((await allText(after)).replace(/\s/g, '')).toContain('tailword');
+  });
 });

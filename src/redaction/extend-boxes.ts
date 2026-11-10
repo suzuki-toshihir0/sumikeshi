@@ -78,7 +78,9 @@ export function extendTextRects(
     if (!dir) return rect;
     const R = toCanon(dir, [rect.x, rect.y, rect.x + rect.width, rect.y + rect.height]);
     const thick = R.b1 - R.b0;
-    // 隣の行の字の端が少しかかるくらいでは止まらないよう、帯は上下を 1 割ずつ狭める
+    // 字は、範囲の高さに少しでもかかれば止まる（広げた先で消えてしまうため。隣の行の字の箱が縁にかかる場合も）。
+    // 線や画像は、上下を 1 割ずつ狭めた帯にかかるものだけで止まる（下線や表の横の罫線が縁にあっても広げられるよう。
+    // 縁にかかる部分は黒い四角の下になる）
     const bandLo = R.b0 + thick * 0.1;
     const bandHi = R.b1 - thick * 0.1;
     let limit = Infinity;
@@ -89,7 +91,7 @@ export function extendTextRects(
       // 範囲にかかるもの（消える）と、帯の外のものは見ない
       const overlaps = B.a0 < R.a1 && B.a1 > R.a0 && B.b0 < R.b1 && B.b1 > R.b0;
       if (overlaps) continue;
-      if (B.b1 <= bandLo || B.b0 >= bandHi) continue;
+      if (kind === 'glyph' ? B.b1 <= R.b0 || B.b0 >= R.b1 : B.b1 <= bandLo || B.b0 >= bandHi) continue;
       if (B.a0 < R.a1) continue; // 後ろ側
       limit = Math.min(limit, B.a0);
     }
