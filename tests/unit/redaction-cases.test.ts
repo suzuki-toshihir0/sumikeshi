@@ -1286,6 +1286,43 @@ describe('字を消したフォントかどうかが、フォントの形から�
     expect(boxes).toContainEqual(BOX_B);
   });
 
+  it('ToUnicode の無い Type3（字形名が文字を表さない）: 字を消して符号を詰めても、残る字の取り出せる文字は変わらない。字を消さないフォントは書き換えない', async () => {
+    const noTu = (doc: PDFDocument, names: string[]) => {
+      const procs: Record<string, ReturnType<PDFDocument['context']['register']>> = {};
+      for (const nm of names) procs[nm] = doc.context.register(doc.context.stream('500 0 0 0 400 700 d1 0 0 400 700 re f'));
+      return doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 400, 700], FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+        CharProcs: procs, Encoding: { Type: 'Encoding', Differences: [97, ...names.map((nm) => PDFName.of(nm))] },
+        FirstChar: 97, LastChar: 97 + names.length - 1, Widths: names.map(() => 500), Resources: {},
+      }));
+    };
+    const before = await rawPage('BT /T1 12 Tf 50 700 Td (ac) Tj ET BT /T1 12 Tf 50 600 Td (b) Tj ET BT /T2 12 Tf 50 500 Td (ab) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('T1'), noTu(doc, ['g97', 'g98', 'g99']));
+      page.node.setFontDictionary(PDFName.of('T2'), noTu(doc, ['g97', 'g98']));
+    });
+    expect((await allText(before)).replace(/\s/g, '')).toBe('acbab');
+    const after = await redact(before, [{ x: 45, y: 595, width: 30, height: 15 }]);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('acab');
+    const { fonts } = await pageFonts(after);
+    const firsts = fonts.map((f) => f.lookup(PDFName.of('FirstChar'))!.toString()).sort();
+    // 字を消さない T2 は元のまま（97 から）
+    expect(firsts).toContain('97');
+  });
+
+  it('ToUnicode の無い Type0（Identity）は、字形の番号も符号も付け替えない（文字の取り出しがフォントの番号に頼るため）', async () => {
+    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C, BOX_D]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <00020004> Tj ET BT /F1 12 Tf 50 600 Td <0003> Tj ET', (doc, page) => {
+      const ref = type0TrueType(doc, 'NoTu', ttf, [1, [601, 602, 603, 604]], [[1, 0x41]]);
+      doc.context.lookup(ref, PDFDict).delete(PDFName.of('ToUnicode'));
+      page.node.setFontDictionary(PDFName.of('F1'), ref);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const tts = await trueTypesIn(after);
+    expect(tts[0].numGlyphs).toBe(5);
+    expect(tts[0].glyphBox(4)).toEqual(BOX_D);
+    expect(tts[0].glyphBox(3)).toBeNull();
+  });
+
   it('符号を詰め直した Type3 の字をタイリングパターンの中で使っていても、パターンの中の文字列も書き換える', async () => {
     const before = await rawPage('BT /T3 12 Tf 50 700 Td (a) Tj ET BT /T3 12 Tf 50 600 Td (b) Tj ET /Pattern cs /P1 scn 0 0 200 200 re f', (doc, page) => {
       const t3 = type3Font(doc, ['ga', 'gb'], [11111, 22222]);

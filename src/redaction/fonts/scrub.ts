@@ -407,7 +407,18 @@ function recodeType3(ctx: PDFContext, font: PDFDict, used: Set<number>, rename =
     }
     font.set(PDFName.of('CharProcs'), np);
   }
-  scrubToUnicode(ctx, font, new Set(), undefined, map);
+  if (get(ctx, font, 'ToUnicode') instanceof PDFStream) {
+    scrubToUnicode(ctx, font, new Set(), undefined, map);
+  } else {
+    // ToUnicode が無いと、ビューアーは字形名（文字を表す名前なら）か符号そのものを文字とみなす。
+    // 符号を変えると取り出せる文字が変わるので、元の符号で取り出せた文字を ToUnicode に書いておく
+    const tu = new Map<number, [number, Uint8Array]>();
+    for (const [oldC, newC] of map) {
+      const u = unicodeOfGlyphName(names[oldC]) ?? oldC;
+      tu.set(newC, [1, u > 0xffff ? Uint8Array.of(0, 0) : Uint8Array.of(u >> 8, u & 0xff)]);
+    }
+    font.set(PDFName.of('ToUnicode'), ctx.register(ctx.flateStream(writeToUnicode(tu, [[Uint8Array.of(0), Uint8Array.of(0xff)]]))));
+  }
   return map;
 }
 
@@ -618,6 +629,8 @@ function scrubGlyphGroup(ctx: PDFContext, ff2: PDFStream, members: GlyphMember[]
 /** 複合フォントを、使う字形だけに詰めて同じ形に書き直してよいか（標準の Identity で、ほかのフォントと何も共有しない） */
 function canNormalizeComposite(ctx: PDFContext, font: PDFDict, cidFont: PDFDict, shared: boolean): boolean {
   if (shared || getName(ctx, cidFont, 'Subtype') !== 'CIDFontType2') return false;
+  // ToUnicode が無いと、ビューアーは文字をフォントの番号から推すので、番号を変えると取り出せる文字が変わる
+  if (!(get(ctx, font, 'ToUnicode') instanceof PDFStream)) return false;
   const enc = get(ctx, font, 'Encoding');
   if (!(enc instanceof PDFName) || !['Identity-H', 'Identity-V'].includes(enc.decodeText())) return false;
   const info = getDict(ctx, cidFont, 'CIDSystemInfo');
@@ -696,6 +709,9 @@ export async function scrubFonts(
       const names = simpleNames(ctx, font);
       const keptNames = new Set([...used].map((c) => names[c]));
       stats.glyphsScrubbed += new Set([...drop].map((c) => names[c]).filter((n) => n && !keptNames.has(n))).size;
+      // ToUnicode の無いフォントは、字を消していなければ書き換えない（取り出せる文字を変えないため）
+      const hasTu = get(ctx, font, 'ToUnicode') instanceof PDFStream;
+      if (drop.size === 0 && (!normalize || !hasTu)) continue;
       recodeMaps.set(font, { map: recodeType3(ctx, font, used, normalize), bytes: 1 });
       continue;
     }
