@@ -801,7 +801,7 @@ export async function redactOperations(
       m.op.operands = [{ type: 'name', value: 'Span' }];
     }
   }
-  const finalOps = out.filter((o) => o.op !== DROPPED);
+  const finalOps = tidyContent(out.filter((o) => o.op !== DROPPED));
   out.length = 0;
   pushAll(out, finalOps);
   // 差し替えた元の画像・フォーム・属性は、資源に名前が残っていると保存されてしまうので外す
@@ -953,6 +953,52 @@ function keptIntervals(a: Point, b: Point, rects: PdfRect[]): [number, number][]
 /** 配列に要素を足す（展開して push すると、要素が多いと引数の数の上限を超えるため） */
 function pushAll<T>(target: T[], ...groups: T[][]): void {
   for (const g of groups) for (const x of g) target.push(x);
+}
+
+const SHOW_OPS = new Set(['Tj', 'TJ', "'", '"']);
+const TEXT_POSITION_OPS = new Set(['Td', 'TD', 'Tm', 'T*']);
+
+/**
+ * 書き直した中身から、消した文字列の数や行が分かる殻を外す。
+ * - Marked Content（BMC / BDC … EMC、MP / DP）。MCID の欠けや空の殻から、消した文字列の数と位置が分かる。
+ *   構造の木は文書の掃除で消すので、意味を持たない。任意の表示（/OC）だけは表示の切り替えに効くので残す
+ * - 描く文字が 1 つも無い BT…ET。中の状態の命令（Tf・Tc など。ET の後も効く）は外に出し、位置の命令は捨てる
+ */
+function tidyContent(ops: Operation[]): Operation[] {
+  const marked: Operation[] = [];
+  const keepStack: boolean[] = [];
+  for (const o of ops) {
+    if (o.op === 'BMC' || o.op === 'BDC') {
+      const keep = o.op === 'BDC' && o.operands[0]?.type === 'name' && o.operands[0].value === 'OC';
+      keepStack.push(keep);
+      if (keep) marked.push(o);
+    } else if (o.op === 'EMC') {
+      // 対応する BMC / BDC の無い EMC は元のまま
+      if (keepStack.length === 0 || keepStack.pop()) marked.push(o);
+    } else if (o.op !== 'MP' && o.op !== 'DP') {
+      marked.push(o);
+    }
+  }
+  const out: Operation[] = [];
+  for (let i = 0; i < marked.length; i++) {
+    if (marked[i].op !== 'BT') {
+      out.push(marked[i]);
+      continue;
+    }
+    let j = i + 1;
+    let shows = false;
+    while (j < marked.length && marked[j].op !== 'ET' && marked[j].op !== 'BT') {
+      if (SHOW_OPS.has(marked[j].op)) shows = true;
+      j++;
+    }
+    if (shows || j >= marked.length || marked[j].op !== 'ET') {
+      out.push(marked[i]);
+      continue;
+    }
+    for (let k = i + 1; k < j; k++) if (!TEXT_POSITION_OPS.has(marked[k].op)) out.push(marked[k]);
+    i = j;
+  }
+  return out;
 }
 
 /** 出力から外す命令の印 */
