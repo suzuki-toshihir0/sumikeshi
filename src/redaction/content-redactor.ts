@@ -822,9 +822,10 @@ export async function redactOperations(
   resources.pruneUnused('Properties', used.Properties);
   // 消した文字だけが使っていたフォント（1 字ごとに別のフォントに分けた PDF など）は、資源から外して丸ごと消す
   const fontsPruned = resources.pruneUnused('Font', used.Font);
-  // 外したフォントの名前の欠けを残さないよう、残るフォントの名前を付け直す。
+  // 外したフォントの名前の欠けを残さないよう、残るフォントの名前を付け直す。外したかどうかに関わらず、
+  // 書き直した中身では必ず付け直す（付け直したかどうかから、フォントを丸ごと外したことが分からないように）。
   // 資源を持たない子の Form や Type3 の字形が親の名前を使うときは、付け直すと壊れるのでしない
-  if (fontsPruned > 0 && inheritedUse.Font.size === 0 && t3.Font.size === 0) {
+  if ((changed || fontsPruned > 0) && inheritedUse.Font.size === 0 && t3.Font.size === 0) {
     const rename = resources.renameAll('Font', 'F');
     for (const o of out) {
       const n0 = o.operands[0];

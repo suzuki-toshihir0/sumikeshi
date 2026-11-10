@@ -828,6 +828,20 @@ describe('消したものの痕跡（番号・名前・符号の穴）', () => {
     expect((await allText(after)).replace(/\s/g, '')).toBe('aa');
   });
 
+  it('フォントを丸ごと外さなかった頁でも、書き直した頁のフォントの資源の名前は付け直す（付け直したかどうかから、フォントが消えたことが分からない）', async () => {
+    const before = await rawPage('BT /F4 12 Tf 50 700 Td (a) Tj ET BT /F7 12 Tf 50 600 Td (a) Tj ET BT /F7 12 Tf 50 500 Td (b) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('F4'), type3Font(doc, ['ga'], [11111]));
+      page.node.setFontDictionary(PDFName.of('F7'), type3Font(doc, ['ga', 'gb'], [33333, 44444]));
+    });
+    // 3 行目（F7 の b）だけを消す。F7 は 2 行目で使うので、どのフォントも丸ごとは外れない
+    const after = await redact(before, [{ x: 45, y: 495, width: 20, height: 15 }]);
+    const doc = await PDFDocument.load(after);
+    const fonts = doc.getPages()[0].node.Resources()!.lookup(PDFName.of('Font'), PDFDict);
+    const names = fonts.keys().map((k) => k.decodeText()).sort();
+    expect(names).toEqual(['F1', 'F2']);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('aa');
+  });
+
   it('Type3: 消した符号の「穴」を残さない（符号を詰め直し、文字列も書き換える）', async () => {
     const before = await rawPage('BT /T3 12 Tf 50 700 Td (ad) Tj ET BT /T3 12 Tf 50 600 Td (bc) Tj ET', (doc, page) => {
       page.node.setFontDictionary(PDFName.of('T3'), type3Font(doc, ['ga', 'gb', 'gc', 'gd'], [11111, 22222, 33333, 44444]));
