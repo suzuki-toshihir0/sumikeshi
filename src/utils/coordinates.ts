@@ -14,6 +14,8 @@ export interface PdfRect {
   y: number;
   width: number;
   height: number;
+  /** 文字選択で作った範囲（黒い四角を、文字の進む向きに空いているところまで広げる） */
+  source?: 'text';
 }
 
 /** CSS座標 → PDF座標に変換 */

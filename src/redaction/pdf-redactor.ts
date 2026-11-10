@@ -14,13 +14,14 @@ import { PDFArray, PDFDict, PDFDocument, PDFName, PDFStream, EncryptedPDFError }
 import type { PdfRect } from '../utils/coordinates';
 import { parseContentStream, type Operation } from './content/lexer';
 import { serializeOperations } from './content/writer';
-import { redactOperations, type RedactionContext, type RedactionStats } from './content-redactor';
+import { redactOperations, type Observed, type RedactionContext, type RedactionStats } from './content-redactor';
+import { extendTextRects } from './extend-boxes';
 import { IDENTITY } from './geometry';
 import { ResourceEditor } from './resources';
 import { removeOverlappingAnnotations, pruneFormFields } from './annotations';
 import { sanitizeDocument } from './sanitize';
 import { scrubFonts } from './fonts/scrub';
-import { resolve, streamBytes } from './pdf-objects';
+import { numbersOf, resolve, streamBytes } from './pdf-objects';
 import { RedactionError } from './errors';
 import type { CMapLoader } from './fonts/cmap';
 import type { FontModel } from './fonts/font-model';
@@ -54,6 +55,7 @@ function normalizeRects(rects: PdfRect[]): PdfRect[] {
       y: Math.min(r.y, r.y + r.height),
       width: Math.abs(r.width),
       height: Math.abs(r.height),
+      ...(r.source === 'text' ? { source: 'text' as const } : {}),
     }))
     .filter((r) => r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].every(Number.isFinite));
 }
@@ -104,7 +106,9 @@ export function mergeRects(rects: PdfRect[]): PdfRect[] {
           const y0 = Math.min(a.y, b.y);
           const x1 = Math.max(a.x + a.width, b.x + b.width);
           const y1 = Math.max(a.y + a.height, b.y + b.height);
-          list[i] = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+          // 文字選択の範囲どうしをまとめたものだけを、文字選択の範囲として扱う（矩形で選んだ範囲は広げない）
+          const source = a.source === 'text' && b.source === 'text' ? { source: 'text' as const } : {};
+          list[i] = { x: x0, y: y0, width: x1 - x0, height: y1 - y0, ...source };
           list = list.filter((_, k) => k !== j);
           merged = true;
           break outer;
@@ -125,6 +129,34 @@ function inheritedAttr(page: PDFDict, key: string, doc: PDFDocument): unknown {
     node = parent instanceof PDFDict ? parent : undefined;
   }
   return undefined;
+}
+
+/** 頁の見える範囲（CropBox、無ければ MediaBox） */
+function pageBox(doc: PDFDocument, page: PDFDict): [number, number, number, number] {
+  for (const key of ['CropBox', 'MediaBox']) {
+    const v = inheritedAttr(page, key, doc);
+    if (v instanceof PDFArray) {
+      const n = numbersOf(doc.context, v);
+      if (n.length === 4 && n.every(Number.isFinite)) return [Math.min(n[0], n[2]), Math.min(n[1], n[3]), Math.max(n[0], n[2]), Math.max(n[1], n[3])];
+    }
+  }
+  return [0, 0, 612, 792];
+}
+
+/** 頁の注釈の矩形（黒い四角を広げるとき、注釈の手前で止める） */
+function annotationRects(doc: PDFDocument, page: PDFDict): [number, number, number, number][] {
+  const out: [number, number, number, number][] = [];
+  const annots = resolve(doc.context, page.get(PDFName.of('Annots')));
+  if (!(annots instanceof PDFArray)) return out;
+  for (let i = 0; i < annots.size(); i++) {
+    const a = resolve(doc.context, annots.get(i));
+    if (!(a instanceof PDFDict)) continue;
+    const r = resolve(doc.context, a.get(PDFName.of('Rect')));
+    if (!(r instanceof PDFArray)) continue;
+    const n = numbersOf(doc.context, r);
+    if (n.length === 4 && n.every(Number.isFinite)) out.push([Math.min(n[0], n[2]), Math.min(n[1], n[3]), Math.max(n[0], n[2]), Math.max(n[1], n[3])]);
+  }
+  return out;
 }
 
 /** 頁の ContentStream（配列なら連結）を読む */
@@ -216,7 +248,7 @@ export async function redactPdf(
   const removedCodes = new Map<PDFDict, Set<number>>();
 
   for (const [pageNumber, rawRects] of redactionMap) {
-    const rects = mergeRects(normalizeRects(rawRects));
+    let rects = mergeRects(normalizeRects(rawRects));
     if (rects.length === 0) continue;
     const pageIndex = pageNumber - 1;
     if (pageIndex < 0 || pageIndex >= pages.length) continue;
@@ -230,6 +262,21 @@ export async function redactPdf(
     }
 
     const resDict = inheritedAttr(page, 'Resources', doc);
+    if (rects.some((r) => r.source === 'text')) {
+      // 文字選択の範囲は、何も消さずに頁を読んで描かれるものの位置を集め、空いているところまで広げる
+      const observed: Observed[] = [];
+      await redactOperations(
+        {
+          ctx, rects: [], cmapLoader, fontCache, formStack: new Set(), pageNumber, removedCodes: new Map(),
+          stats: { glyphsRemoved: 0, imagesRedacted: 0, pathsRemoved: 0, pathsTrimmed: 0, formsRewritten: 0 },
+          observe: (o) => observed.push(o),
+        },
+        parseContentStream(pageContentBytes(doc, page)),
+        new ResourceEditor(ctx, resDict instanceof PDFDict ? resDict : undefined),
+        IDENTITY,
+      );
+      rects = mergeRects(extendTextRects(rects, observed, annotationRects(doc, page), pageBox(doc, page)));
+    }
     const resources = new ResourceEditor(ctx, resDict instanceof PDFDict ? resDict : undefined);
     const rc: RedactionContext = {
       ctx, rects, cmapLoader, fontCache, stats, formStack: new Set(), pageNumber, removedCodes,

@@ -34,6 +34,8 @@ export interface FontModel {
   box(c: CharCode): [number, number, number, number];
   /** 語間（Tw）がかかる符号か（1 バイトの 32） */
   isWordSpace(c: CharCode): boolean;
+  /** 何も描かない字か（Type3 の d1 の外接矩形が空、埋め込みの TrueType の輪郭の無い字形）。分からなければ false */
+  blank(c: CharCode): boolean;
   /** 複合フォント（Type0）なら、符号から CID を引く */
   cidOf?(code: number): number;
   /** 複合フォント（Type0）なら、CMap */
@@ -101,7 +103,13 @@ class SimpleFont implements FontModel {
     private readonly ink: (code: number) => Box4 | null = () => null,
     /** 字形の外接矩形が確実か（字形が一意に決まる）。確実なら、文字送りの箱ではなく字形で判定する */
     private readonly inkExact = false,
+    /** 何も描かない字か */
+    private readonly blankFn: (code: number) => boolean = () => false,
   ) {}
+
+  blank(c: CharCode): boolean {
+    return this.blankFn(c.code);
+  }
 
   split(bytes: Uint8Array): CharCode[] {
     return Array.from(bytes, (code, i) => ({ code, start: i, length: 1 }));
@@ -144,7 +152,13 @@ class CompositeFont implements FontModel {
     private readonly extent: [number, number],
     /** CID ごとの字形の外接矩形（1/1000 em）。分からなければ null */
     private readonly ink: (cid: number) => Box4 | null = () => null,
+    /** CID の字形が何も描かないか */
+    private readonly blankFn: (cid: number) => boolean = () => false,
   ) {}
+
+  blank(c: CharCode): boolean {
+    return this.blankFn(this.cidOf(c.code));
+  }
 
   get vertical(): boolean {
     return this.cmap.vertical;
@@ -337,6 +351,7 @@ export async function createFontModel(ctx: PDFContext, fontDict: PDFDict, loader
     const names = glyphNames(ctx, fontDict, '');
     const procs = get(ctx, fontDict, 'CharProcs');
     const inkCache = new Map<number, Box4 | null>();
+    const blankCodes = new Set<number>();
     const ink = (code: number): Box4 | null => {
       if (inkCache.has(code)) return inkCache.get(code)!;
       let box: Box4 | null = null;
@@ -347,6 +362,8 @@ export async function createFontModel(ctx: PDFContext, fontDict: PDFDict, loader
           const first = parseContentStream(streamBytes(ctx, proc)).find((o) => o.op === 'd1' || o.op === 'd0');
           if (first?.op === 'd1' && first.operands.length >= 6) {
             const [, , llx, lly, urx, ury] = first.operands.map((o) => (o.type === 'number' ? o.value : NaN));
+            // d1 の外接矩形が空なら、字形は何も描けない（描いても切り抜かれる）
+            if ([llx, lly, urx, ury].every(Number.isFinite) && urx === llx && ury === lly) blankCodes.add(code);
             if ([llx, lly, urx, ury].every(Number.isFinite) && (urx !== llx || ury !== lly)) {
               const xs = [llx, urx].map((x) => x * fontMatrix[0]);
               const ys = [lly, ury].map((y) => y * fontMatrix[3]);
@@ -361,7 +378,10 @@ export async function createFontModel(ctx: PDFContext, fontDict: PDFDict, loader
       return box;
     };
     // Type3 の箱はテキスト空間で持つ（fontMatrix を掛けた後）
-    return new SimpleFont(fontMatrix, widthsFn, extent, 0.25, ink, true);
+    return new SimpleFont(fontMatrix, widthsFn, extent, 0.25, ink, true, (code) => {
+      ink(code);
+      return blankCodes.has(code);
+    });
   }
 
   const std = standardFontName(getName(ctx, fontDict, 'BaseFont'));
@@ -373,18 +393,24 @@ export async function createFontModel(ctx: PDFContext, fontDict: PDFDict, loader
   }
   const [d, a] = verticalExtent(ctx, descriptor, fallback);
   let ink: (code: number) => Box4 | null = () => null;
+  let blank: (code: number) => boolean = () => false;
   const tt = embeddedTrueType(ctx, descriptor);
   if (tt) {
     const symbolic = ((getNum(ctx, descriptor, 'Flags') ?? 0) & 4) !== 0;
     const upem = tt.unitsPerEm;
+    // 符号から Unicode は、ASCII の範囲だけ素直に対応させる（それ以外は cmap の (3,0) / (1,0) に頼る）
+    const gidOf = (code: number) => simpleTrueTypeGid(tt, code, code >= 0x20 && code < 0x7f ? code : undefined, symbolic);
     ink = (code) => {
-      // 符号から Unicode は、ASCII の範囲だけ素直に対応させる（それ以外は cmap の (3,0) / (1,0) に頼る）
-      const gid = simpleTrueTypeGid(tt, code, code >= 0x20 && code < 0x7f ? code : undefined, symbolic);
+      const gid = gidOf(code);
       const b = gid !== undefined ? tt.glyphBox(gid) : null;
       return b ? [b[0] / upem, b[1] / upem, b[2] / upem, b[3] / upem] : null;
     };
+    blank = (code) => {
+      const gid = gidOf(code);
+      return gid !== undefined && gid > 0 && gid < tt.numGlyphs && !tt.glyphBox(gid);
+    };
   }
-  return new SimpleFont([0.001, 0, 0, 0.001, 0, 0], simpleWidths(ctx, fontDict, descriptor), [d / 1000, a / 1000], 0.25, ink);
+  return new SimpleFont([0.001, 0, 0, 0.001, 0, 0], simpleWidths(ctx, fontDict, descriptor), [d / 1000, a / 1000], 0.25, ink, false, blank);
 }
 
 async function createCompositeFont(ctx: PDFContext, fontDict: PDFDict, loader?: CMapLoader): Promise<FontModel> {
@@ -416,6 +442,7 @@ async function createCompositeFont(ctx: PDFContext, fontDict: PDFDict, loader?: 
   const w2 = parseW2(ctx, getArray(ctx, cidFont, 'W2'));
   const extent = verticalExtent(ctx, descriptor, [-120, 880]);
   let ink: (cid: number) => Box4 | null = () => null;
+  let blank: (cid: number) => boolean = () => false;
   const tt = getName(ctx, cidFont, 'Subtype') === 'CIDFontType2' ? embeddedTrueType(ctx, descriptor) : null;
   if (tt) {
     // CID → 字形の番号。CIDToGIDMap が無いか Identity なら同じ番号、ストリームなら 2 バイトずつの表
@@ -430,8 +457,12 @@ async function createCompositeFont(ctx: PDFContext, fontDict: PDFDict, loader?: 
       const b = tt.glyphBox(toGid(cid));
       return b ? [b[0] * scale, b[1] * scale, b[2] * scale, b[3] * scale] : null;
     };
+    blank = (cid) => {
+      const gid = toGid(cid);
+      return gid > 0 && gid < tt.numGlyphs && !tt.glyphBox(gid);
+    };
   }
-  return new CompositeFont(cmap, w, dw, w2, dw2, extent, ink);
+  return new CompositeFont(cmap, w, dw, w2, dw2, extent, ink, blank);
 }
 
 export { PDFName };

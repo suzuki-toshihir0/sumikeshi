@@ -189,4 +189,51 @@ test.describe('ブラウザでの墨消し', () => {
     expect(Math.abs(left - 50)).toBeLessThan(1);
     expect(Math.abs(width - 140)).toBeLessThan(2);
   });
+
+  test('文字選択で消すと、黒い四角は選んだ文字より先の空いているところまで広がる（四角の幅から文字列の幅が分からない）', async ({ page }) => {
+    const errors = collectErrors(page);
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('chrome.pdf'));
+    await waitForRender(page);
+    const canvas = (await page.locator('#pdf-canvas').boundingBox())!;
+    const scale = canvas.width / 612;
+    // 「賃借人氏名：見本 花子　生年月日：…」の「見本 花子」を、人と同じく字の上をドラッグして選ぶ。
+    // Chrome の Noto は「見」「子」などを康熙部首の文字（U+2F92 ⾒、U+2F26 ⼦）に写すので、その字で探す
+    const first = (await page.locator('#text-layer span', { hasText: '\u2F92' }).first().boundingBox())!;
+    const last = (await page.locator('#text-layer span', { hasText: '\u2F26' }).first().boundingBox())!;
+    const y = first.y + first.height / 2;
+    await page.mouse.move(first.x + 1, y);
+    await page.mouse.down();
+    await page.mouse.move(last.x + last.width - 1, y, { steps: 8 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect').first()).toBeVisible();
+    const after = await redactAndDownload(page);
+    expect(errors).toEqual([]);
+    const text = await allText(after);
+    expect(text).not.toContain('花子');
+    expect(text).toContain('1990');
+    const { PDFDocument, PDFName } = await import('pdf-lib');
+    const { parseContentStream } = await import('../../src/redaction/content/lexer');
+    const { contentsBytes } = await import('../../src/redaction/pdf-objects');
+    const doc = await PDFDocument.load(after);
+    const ops = parseContentStream(contentsBytes(doc.context, doc.getPages()[0].node.get(PDFName.of('Contents'))));
+    const res = ops.filter((o) => o.op === 're').map((o) => o.operands.map((x) => (x.type === 'number' ? x.value : NaN)));
+    const box = res[res.length - 1];
+    // 選んだ「子」の右端より先（全角の空白の分）まで広がり、次の字（「生年月日」の「生」）の手前で止まる
+    const selectedRight = (last.x + last.width - canvas.x) / scale;
+    const spans = page.locator('#text-layer span');
+    const n = await spans.count();
+    let nextLeft = Infinity;
+    for (let i = 0; i < n; i++) {
+      const b = await spans.nth(i).boundingBox();
+      if (!b || Math.abs(b.y - first.y) > first.height / 2) continue;
+      const t = (await spans.nth(i).textContent()) ?? '';
+      if (!t.trim()) continue;
+      const left = (b.x - canvas.x) / scale;
+      if (left > selectedRight + 1) nextLeft = Math.min(nextLeft, left);
+    }
+    expect(nextLeft).toBeLessThan(Infinity);
+    expect(box[0] + box[2]).toBeGreaterThan(selectedRight + 3);
+    expect(box[0] + box[2]).toBeLessThan(nextLeft);
+  });
 });

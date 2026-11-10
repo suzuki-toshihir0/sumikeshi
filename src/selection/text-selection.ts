@@ -73,7 +73,8 @@ export class TextSelection {
         height: clientRect.height,
       };
       const pdfRect = cssToPdfRect(cssRect, this.viewport);
-      this.store.add(this.pageNum, pdfRect);
+      // 文字選択の範囲（墨消しのとき、黒い四角を空いているところまで広げる）
+      this.store.add(this.pageNum, { ...pdfRect, source: 'text' });
     }
 
     selection.removeAllRanges();

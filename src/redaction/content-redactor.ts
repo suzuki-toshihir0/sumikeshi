@@ -52,6 +52,17 @@ export interface RedactionContext {
   pageNumber: number;
   /** フォントごとの、消した文字の符号（後でフォントのデータから消すため） */
   removedCodes: Map<PDFDict, Set<number>>;
+  /** 描かれるもの（字・パスの辺・画像）の頁の上の形を知らせる。黒い四角を広げる先を決めるのに使う */
+  observe?: (o: Observed) => void;
+}
+
+/** 頁に描かれるもの 1 つの形（頁の座標）。字は文字の進む向き（dir、単位ベクトル）も持つ */
+export interface Observed {
+  kind: 'glyph' | 'path' | 'image';
+  quad: Point[];
+  dir?: Point;
+  /** 何も描かない字（半角の空白、中身の無い字形） */
+  blank?: boolean;
 }
 
 /** フォントを設定した命令（Tf の資源の名前か、gs の ExtGState の名前） */
@@ -298,6 +309,8 @@ export async function redactOperations(
     const quad = model?.vertical
       ? transformBox(trm, -0.5, -L, 0.5, 0.1)
       : transformBox(trm, -0.1, -0.3, L, 1.1);
+    // 位置の分からない字は、行の先まで伸ばした帯ごと「描かれるもの」として知らせる（黒い四角をその手前で止める）
+    rc.observe?.({ kind: 'path', quad });
     return overlapsAny(quad);
   };
 
@@ -414,7 +427,16 @@ export async function redactOperations(
           }
         } else {
           const [x0, y0, x1, y1] = model.box(c);
-          remove = overlapsAny(transformBox(textRenderingMatrix(), x0, y0, x1, y1));
+          const trm = textRenderingMatrix();
+          const quad = transformBox(trm, x0, y0, x1, y1);
+          if (rc.observe) {
+            const o = apply(trm, 0, 0);
+            const d = model.vertical ? apply(trm, 0, -1) : apply(trm, 1, 0);
+            const len = Math.hypot(d[0] - o[0], d[1] - o[1]) || 1;
+            const blank = model.isWordSpace(c) || model.blank(c) || !(x1 - x0 > 0 && y1 - y0 > 0);
+            rc.observe({ kind: 'glyph', quad, dir: [(d[0] - o[0]) / len, (d[1] - o[1]) / len], blank });
+          }
+          remove = overlapsAny(quad);
         }
         if (remove) {
           if (!rewriting) startRewriting();
@@ -477,6 +499,24 @@ export async function redactOperations(
 
     const ctm = gs.ctm;
     const halfWidth = stroke ? (Math.max(gs.lineWidth, 0) * maxScale(ctm)) / 2 + 0.5 : 0;
+    if (rc.observe && !clipOnly) {
+      // パスは辺ごとに知らせる（表の罫線を 1 つのパスで描くものでも、縦の線ごとに止まれるように）
+      for (const sp of paths) {
+        const poly = subpathPolyline(sp, ctm);
+        const n = poly.length;
+        const closed = fill || sp.closed;
+        for (let i = 0; i + 1 < n + (closed && n > 2 ? 1 : 0); i++) {
+          const a = poly[i];
+          const b = poly[(i + 1) % n];
+          const w = halfWidth;
+          rc.observe({
+            kind: 'path',
+            quad: [[Math.min(a[0], b[0]) - w, Math.min(a[1], b[1]) - w], [Math.max(a[0], b[0]) + w, Math.min(a[1], b[1]) - w],
+              [Math.max(a[0], b[0]) + w, Math.max(a[1], b[1]) + w], [Math.min(a[0], b[0]) - w, Math.max(a[1], b[1]) + w]],
+          });
+        }
+      }
+    }
     const inv = invert(ctm);
     const result: Operation[] = [];
     /** 塗りと線の両方を描く（B など）とき、線の側。切り口に線を引かないよう、塗りと分けて描く */
@@ -779,6 +819,7 @@ export async function redactOperations(
         break;
       }
       case 'BI': {
+        rc.observe?.({ kind: 'image', quad: transformBox(gs.ctm, 0, 0, 1, 1) });
         const replaced = await redactInlineImage(rc, o, resources, gs.ctm);
         if (replaced) {
           changed = true;
@@ -1046,6 +1087,7 @@ async function handleXObject(
   const subtype = getName(rc.ctx, xobj.dict, 'Subtype');
 
   if (subtype === 'Image') {
+    rc.observe?.({ kind: 'image', quad: transformBox(gs.ctm, 0, 0, 1, 1) });
     const newRef = await redactImageXObject(rc, xobj, gs.ctm, resources);
     if (!newRef) return null;
     rc.stats.imagesRedacted++;
