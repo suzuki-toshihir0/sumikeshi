@@ -62,10 +62,15 @@ function normalizeRects(rects: PdfRect[]): PdfRect[] {
  * 同じ行（縦書きなら同じ列）で隣り合う範囲を 1 つにまとめる。
  * 文字選択では 1 文字ずつの矩形が並ぶので、そのまま黒い四角にすると、字数や姓と名の区切りが見えてしまう。
  * 消す範囲もまとめた形で扱う（隙間の空白も消える）。
+ *
+ * まとめると外接する矩形になるので、並ぶ向きと直交する辺（横に並ぶなら上下、縦に並ぶなら左右）が
+ * 揃っているものだけをまとめる。揃っていないもの（表の別の行の長さの違う値など）までまとめると、
+ * どちらの範囲にも入っていない角（短い行の横のラベルや隣の欄）まで消してしまう。
  */
 export function mergeRects(rects: PdfRect[]): PdfRect[] {
   let list = rects.map((r) => ({ ...r }));
   const overlap1d = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);
+  const near = (a: number, b: number, tol: number) => Math.abs(a - b) <= tol;
   let merged = true;
   while (merged) {
     merged = false;
@@ -77,14 +82,24 @@ export function mergeRects(rects: PdfRect[]): PdfRect[] {
         const hOverlap = overlap1d(a.x, a.x + a.width, b.x, b.x + b.width);
         const minH = Math.min(a.height, b.height);
         const minW = Math.min(a.width, b.width);
-        // 横に並ぶ（同じ行）: 縦の重なりが高さの半分以上で、横の隙間が高さの 0.6 倍以下
-        const sameLine = vOverlap >= minH * 0.5 && -hOverlap <= minH * 0.6;
-        // 縦に並ぶ（同じ列。縦書きの字）: 横の重なりが幅の半分以上で、縦の隙間が字の大きさ（幅と高さの小さいほう）の 0.6 倍以下。
-        // 幅で測ると、横に長い行の矩形が縦に並んだとき（別の行）までまとめてしまう
-        const sameColumn = hOverlap >= minW * 0.5 && -vOverlap <= Math.min(minW, minH) * 0.6;
-        // 面積を持って重なる
-        const intersect = vOverlap > 0 && hOverlap > 0;
-        if (sameLine || sameColumn || intersect) {
+        const maxW = Math.max(a.width, b.width);
+        // 字の大きさの目安（1 文字なら字の幅か高さ、行や列なら太さ）。辺が揃っているとみなす幅はこの 0.15 倍。
+        // ずれの分だけ外接する矩形が隣の字にかかり、その字まで消すので、小さく取る
+        const tol = 0.15 * Math.max(Math.min(a.width, a.height), Math.min(b.width, b.height));
+        // 含むとみなすはみ出しは、小さいほうの範囲の大きさで測る（大きいほうで測ると、はみ出しが大きくなる）
+        const nestTol = 0.1 * Math.min(a.width, a.height, b.width, b.height);
+        const yAligned = near(a.y, b.y, tol) && near(a.y + a.height, b.y + b.height, tol);
+        const xAligned = near(a.x, b.x, tol) && near(a.x + a.width, b.x + b.width, tol);
+        // 横に並ぶ（同じ行）: 上下の辺が揃い、横の隙間が字の高さの 0.6 倍以下。
+        // 縦書きの列（縦に長い）どうしでは高さが字の大きさにならないので、幅の 2 倍で頭を抑える
+        const sameLine = yAligned && -hOverlap <= Math.min(minH, 2 * maxW) * 0.6;
+        // 縦に並ぶ（同じ列。縦書きの字）: 左右の辺が揃い、縦の隙間が字の大きさ（幅と高さの小さいほう）の 0.6 倍以下
+        const sameColumn = xAligned && -vOverlap <= Math.min(minW, minH) * 0.6;
+        // 一方が他方を含む
+        const contains = (o: PdfRect, n: PdfRect) =>
+          n.x >= o.x - nestTol && n.y >= o.y - nestTol && n.x + n.width <= o.x + o.width + nestTol && n.y + n.height <= o.y + o.height + nestTol;
+        const nested = vOverlap > 0 && hOverlap > 0 && (contains(a, b) || contains(b, a));
+        if (sameLine || sameColumn || nested) {
           const x0 = Math.min(a.x, b.x);
           const y0 = Math.min(a.y, b.y);
           const x1 = Math.max(a.x + a.width, b.x + b.width);
