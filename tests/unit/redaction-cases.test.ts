@@ -1189,9 +1189,13 @@ describe('字を消したフォントかどうかが、フォントの形から�
     expect((await allText(after)).replace(/\s/g, '')).toBe('ACLACL');
   });
 
-  it('単純な TrueType: 使わない字形を持つフォントでも、使う字形だけに詰める（残る字形の番号のずれから、消した字の位置が分からない）', async () => {
-    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C, BOX_D], 1000, [[0x41, 1], [0x42, 2], [0x43, 3], [0x44, 4]]);
-    // B（2）は使わない字形。C を消す
+  it('単純な TrueType で、元のフォントの番号のまま使わない字形を空にした形なら、消した字形もその場で空にする（番号をずらさない）', async () => {
+    // 40 字形のうち A(10)・C(12)・D(13) だけが中身を持つ（Word などの形）。C を消す
+    const boxes: ([number, number, number, number] | null)[] = Array.from({ length: 40 }, () => null);
+    boxes[10] = BOX_A;
+    boxes[12] = BOX_C;
+    boxes[13] = BOX_D;
+    const ttf = tinyTrueType(boxes, 1000, [[0x41, 10], [0x43, 12], [0x44, 13]]);
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (AD) Tj ET BT /F1 12 Tf 50 600 Td (C) Tj ET', (doc, page) => {
       const font = doc.context.register(doc.context.obj({
         Type: 'Font', Subtype: 'TrueType', BaseFont: 'ABCDEF+Tiny', FirstChar: 65, LastChar: 68, Widths: [600, 0, 600, 600],
@@ -1203,11 +1207,83 @@ describe('字を消したフォントかどうかが、フォントの形から�
     const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
     const tts = await trueTypesIn(after);
     expect(tts).toHaveLength(1);
-    expect(tts[0].numGlyphs).toBe(3);
-    const c31 = tts[0].cmaps.get('3,1')!;
-    expect(c31(0x44)).toBe(2);
-    expect(c31(0x42)).toBeUndefined();
+    expect(tts[0].numGlyphs).toBe(40);
+    expect(tts[0].glyphBox(12)).toBeNull();
+    expect(tts[0].glyphBox(13)).toEqual(BOX_D);
+    expect(tts[0].glyphBox(10)).toEqual(BOX_A);
     expect((await allText(after)).replace(/\s/g, '')).toBe('AD');
+  });
+
+  it('2 つの Type0 が同じ CIDFont（幅と字形）を使うとき、一方で字を消しても、もう一方の字の幅と字形は残る', async () => {
+    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C, BOX_D]);
+    const before = await rawPage(
+      'BT /F1 12 Tf 50 700 Td <0001> Tj ET BT /F1 12 Tf 50 600 Td <0003> Tj ET BT /F2 12 Tf 50 500 Td <00020004> Tj ET',
+      (doc, page) => {
+        const shared = type0TrueType(doc, 'Shared', ttf, [1, [601, 602, 603, 604]], [[1, 0x41], [2, 0x42], [3, 0x43], [4, 0x44]]);
+        const f1 = doc.context.lookup(shared, PDFDict);
+        const f2 = doc.context.obj({}) as PDFDict;
+        for (const [k, v] of f1.entries()) f2.set(k, v);
+        page.node.setFontDictionary(PDFName.of('F1'), shared);
+        page.node.setFontDictionary(PDFName.of('F2'), doc.context.register(f2));
+      },
+    );
+    const pb = await extractText(before);
+    // F1 の C だけを消す
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const pa = await extractText(after);
+    expect(pa.map((t) => t.str).join('').replace(/\s/g, '')).toBe('ABD');
+    const wOf = (items: typeof pa) => items.find((t) => t.str.includes('B'))!.box.width;
+    expect(wOf(pa)).toBeCloseTo(wOf(pb), 3);
+    const tts = await trueTypesIn(after);
+    expect(tts).toHaveLength(1);
+    const boxes = Array.from({ length: tts[0].numGlyphs }, (_, g) => tts[0].glyphBox(g));
+    expect(boxes).toContainEqual(BOX_B);
+    expect(boxes).toContainEqual(BOX_D);
+    expect(boxes).not.toContainEqual(BOX_C);
+  });
+
+  it('文字の集まり（Ordering）が Identity でない Type0 は、字形の番号も符号も付け替えない（poppler はフォントの cmap で引く）', async () => {
+    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C, BOX_D]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <00020004> Tj ET BT /F1 12 Tf 50 600 Td <0003> Tj ET', (doc, page) => {
+      const ref = type0TrueType(doc, 'Odd', ttf, [1, [601, 602, 603, 604]], [[1, 0x41], [2, 0x42], [3, 0x43], [4, 0x44]]);
+      const f = doc.context.lookup(ref, PDFDict);
+      const cid = (f.lookup(PDFName.of('DescendantFonts'), PDFArray)).lookup(0, PDFDict);
+      cid.set(PDFName.of('CIDSystemInfo'), doc.context.obj({ Registry: PDFString.of('PDFAUTOCAD'), Ordering: PDFString.of('Indentity0'), Supplement: 0 }));
+      page.node.setFontDictionary(PDFName.of('F1'), ref);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const tts = await trueTypesIn(after);
+    expect(tts[0].numGlyphs).toBe(5);
+    expect(tts[0].glyphBox(2)).toEqual(BOX_B);
+    expect(tts[0].glyphBox(4)).toEqual(BOX_D);
+    expect(tts[0].glyphBox(3)).toBeNull();
+    const { parseContentStream } = await import('../../src/redaction/content/lexer');
+    const doc = await PDFDocument.load(after);
+    const { contentsBytes } = await import('../../src/redaction/pdf-objects');
+    const ops = parseContentStream(contentsBytes(doc.context, doc.getPages()[0].node.get(PDFName.of('Contents'))));
+    const bytes = ops.filter((o) => o.op === 'Tj' || o.op === 'TJ').flatMap((o) => {
+      const a = o.operands[0];
+      return a.type === 'string' ? [...a.bytes] : a.type === 'array' ? a.items.flatMap((i) => (i.type === 'string' ? [...i.bytes] : [])) : [];
+    });
+    expect(bytes).toEqual([0, 2, 0, 4]);
+  });
+
+  it('単純な TrueType で、WinAnsi に無い字形名（Idotaccent など）の字も描けるまま残る', async () => {
+    // İ（U+0130）は (3,1) の cmap でだけ引ける。符号 0x80 を Differences で /Idotaccent にする
+    const ttf = tinyTrueType([null, BOX_A, BOX_B, BOX_C], 1000, [[0x41, 1], [0x130, 2], [0x43, 3], [0x80, 3]]);
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td <4180> Tj ET BT /F1 12 Tf 50 600 Td (C) Tj ET', (doc, page) => {
+      const font = doc.context.register(doc.context.obj({
+        Type: 'Font', Subtype: 'TrueType', BaseFont: 'ABCDEF+Tiny', FirstChar: 65, LastChar: 128,
+        Widths: Array.from({ length: 64 }, () => 600),
+        Encoding: { Type: 'Encoding', Differences: [128, PDFName.of('Idotaccent')] },
+        FontDescriptor: doc.context.obj({ Type: 'FontDescriptor', FontName: 'ABCDEF+Tiny', Flags: 32, Ascent: 800, Descent: -200, FontBBox: [0, -200, 600, 800], ItalicAngle: 0, CapHeight: 700, StemV: 80, FontFile2: doc.context.register(doc.context.flateStream(ttf)) }),
+      }));
+      page.node.setFontDictionary(PDFName.of('F1'), font);
+    });
+    const after = await redact(before, [{ x: 45, y: 595, width: 20, height: 15 }]);
+    const tts = await trueTypesIn(after);
+    const boxes = Array.from({ length: tts[0].numGlyphs }, (_, g) => tts[0].glyphBox(g));
+    expect(boxes).toContainEqual(BOX_B);
   });
 
   it('符号を詰め直した Type3 の字をタイリングパターンの中で使っていても、パターンの中の文字列も書き換える', async () => {

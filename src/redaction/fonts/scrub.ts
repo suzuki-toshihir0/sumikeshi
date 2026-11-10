@@ -20,7 +20,7 @@ import { parseContentStream } from '../content/lexer';
 import { createFontModel, glyphNames, parseW, parseW2, type FontModel } from './font-model';
 import { collectFontUsage, rewriteFontCodes } from './usage';
 import { parseTrueType, simpleTrueTypeGid, type TrueTypeInfo } from './truetype';
-import { compactTrueType } from './truetype-scrub';
+import { compactTrueType, scrubTrueType } from './truetype-scrub';
 import type { CMapLoader } from './cmap';
 import { MacRomanEncoding, STANDARD_FONT_ALIASES, WinAnsiEncoding } from '../vendor/pdfjs-encodings';
 
@@ -156,23 +156,6 @@ function cleanDescriptor(descriptor: PDFDict | undefined): void {
   descriptor?.delete(PDFName.of('CIDSet'));
 }
 
-/**
- * TrueType から字形を番号ごと取り除き、残る字形の番号を詰め直して入れ直す。古い番号 → 新しい番号を返す。
- * 書き換えられない（壊れている、コレクションなど）ときは、フォントのデータごと外して null を返す
- */
-function compactFontFile2(ctx: PDFContext, descriptor: PDFDict, bytes: Uint8Array, dropGids: Set<number>, stats: FontScrubStats): Map<number, number> | null {
-  try {
-    const r = compactTrueType(bytes, dropGids);
-    replaceFontFile2(ctx, descriptor, r.font);
-    stats.glyphsScrubbed += r.dropped.size;
-    return r.map;
-  } catch {
-    descriptor.delete(PDFName.of('FontFile2'));
-    stats.fontsUnembedded++;
-    return null;
-  }
-}
-
 /** 書き換えた TrueType を FontFile2 に入れ直す */
 function replaceFontFile2(ctx: PDFContext, descriptor: PDFDict, bytes: Uint8Array): void {
   const s = ctx.flateStream(bytes);
@@ -196,16 +179,6 @@ function simpleNames(ctx: PDFContext, font: PDFDict): (string | undefined)[] {
   const base = getName(ctx, font, 'BaseFont')?.replace(/^[A-Z]{6}\+/, '') ?? '';
   const std = STANDARD_FONT_ALIASES[base] ?? base;
   return glyphNames(ctx, font, std);
-}
-
-/** グリフ名から Unicode を推し量る（uniXXXX / uXXXX と、ASCII の名前） */
-function unicodeOfName(name: string | undefined, code: number): number | undefined {
-  if (name) {
-    const m = name.match(/^uni([0-9A-Fa-f]{4})$/) ?? name.match(/^u([0-9A-Fa-f]{4,6})$/);
-    if (m) return parseInt(m[1], 16);
-    if (name.length === 1) return name.charCodeAt(0);
-  }
-  return code >= 0x20 && code < 0x7f ? code : undefined;
 }
 
 /** Windows-1252 の 0x80〜0x9F（-1 は割り当て無し） */
@@ -251,7 +224,7 @@ function resolveSimpleGids(ctx: PDFContext, font: PDFDict, tt: TrueTypeInfo, cod
     if (u1 !== undefined) us.add(u1);
     const t = toUni?.map.get(code);
     if (t && t[1].length >= 2) us.add((t[1][0] << 8) | t[1][1]);
-    if (!nm && code >= 0x20 && code < 0x7f) us.add(code);
+    if (code >= 0x20 && code < 0x7f) us.add(code);
     const found = new Set<number>();
     for (const [key, fn] of tt.cmaps) {
       const cs = [code, 0xf000 + code, 0xf100 + code, 0xf200 + code, ...us];
@@ -276,23 +249,6 @@ function resolveSimpleGids(ctx: PDFContext, font: PDFDict, tt: TrueTypeInfo, cod
     for (const g of found) gids.add(g);
   }
   return { gids, certain };
-}
-
-/** 単純な TrueType の符号に対応しうる字形の番号（ビューアーの取りうる道筋をすべて） */
-function simpleGidCandidates(tt: TrueTypeInfo, code: number, name: string | undefined): Set<number> {
-  const out = new Set<number>();
-  const u = unicodeOfName(name, code);
-  for (const symbolic of [true, false]) {
-    const g = simpleTrueTypeGid(tt, code, u, symbolic);
-    if (g) out.add(g);
-  }
-  for (const [, fn] of tt.cmaps) {
-    for (const c of [code, 0xf000 + code, ...(u !== undefined ? [u] : [])]) {
-      const g = fn(c);
-      if (g) out.add(g);
-    }
-  }
-  return out;
 }
 
 function rebuildDifferences(ctx: PDFContext, font: PDFDict, drop: Set<number>): void {
@@ -361,64 +317,22 @@ function zeroWidths(ctx: PDFContext, font: PDFDict, drop: Set<number>): void {
   font.set(PDFName.of('Widths'), ctx.obj(ws));
 }
 
-function scrubSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Set<number>, removed: Set<number>, stats: FontScrubStats): void {
-  const subtype = getName(ctx, font, 'Subtype');
-  const names = simpleNames(ctx, font);
-  const descriptor = getDict(ctx, font, 'FontDescriptor');
-
-  if (subtype === 'Type3') {
-    const procs = get(ctx, font, 'CharProcs');
-    if (procs instanceof PDFDict) {
-      const keepNames = new Set([...used].map((c) => names[c]).filter(Boolean) as string[]);
-      const newProcs = ctx.obj({}) as PDFDict;
-      for (const [k, v] of procs.entries()) {
-        const nm = k.decodeText();
-        const dropped = [...drop].some((c) => names[c] === nm) && !keepNames.has(nm);
-        if (dropped) stats.glyphsScrubbed++;
-        else newProcs.set(k, v);
-      }
-      font.set(PDFName.of('CharProcs'), newProcs);
-    }
-  } else {
-    const tt = loadTrueType(ctx, descriptor);
-    if (tt && descriptor) {
-      const usedGids = new Set<number>();
-      for (const c of used) for (const g of simpleGidCandidates(tt.tt, c, names[c])) usedGids.add(g);
-      const dropGids = new Set<number>();
-      let unknown = false;
-      for (const c of drop) {
-        const cand = simpleGidCandidates(tt.tt, c, names[c]);
-        if (cand.size === 0) unknown = true;
-        for (const g of cand) if (!usedGids.has(g)) dropGids.add(g);
-      }
-      if (unknown) {
-        // 消した文字の字形を特定できない: フォントのデータごと外す
-        descriptor.delete(PDFName.of('FontFile2'));
-        stats.fontsUnembedded++;
-      } else if (dropGids.size > 0) {
-        // 単純なフォントの符号は文字そのもの。字形の番号の付け替えは、フォントの cmap の中で済む
-        compactFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
-      }
-    } else {
-      unembed(ctx, descriptor, stats);
-      if (descriptor?.has(PDFName.of('FontFile2'))) {
-        descriptor.delete(PDFName.of('FontFile2'));
-        stats.fontsUnembedded++;
-      }
-    }
-  }
-  // 使わない符号にも幅や名前を入れる流儀なら、消した文字の分も残す（0 にすると、どれを消したかが分かる）
-  if (subtype === 'Type3') {
-    // Type3 は符号を詰め直す（消した符号の「穴」を残さない）。文字列の書き換えは後で文書全体に行う
-    return;
-  }
+/**
+ * 単純フォント（Type3 以外）の幅・名前・ToUnicode を書き直す。
+ * normalize なら使う符号の分だけ（字を消したかどうかに関わらず同じ形）、そうでなければ消した符号の分だけを消す。
+ * 使わない符号にも幅や名前を入れる流儀のフォントは、そのまま（抜くと、どれを消したかが分かる）
+ */
+function simpleMetadata(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Set<number>, removed: Set<number>, normalize: boolean): void {
   const everUsed = new Set([...used, ...removed]);
+  const target = new Set<number>(drop);
+  if (normalize) for (let c = 0; c < 256; c++) if (!used.has(c)) target.add(c);
+  if (target.size === 0) return;
   if (!fillsUnusedCodes(ctx, font, everUsed)) {
-    zeroWidths(ctx, font, drop);
-    rebuildDifferences(ctx, font, drop);
+    zeroWidths(ctx, font, target);
+    rebuildDifferences(ctx, font, target);
   }
-  scrubToUnicode(ctx, font, drop, everUsed);
-  cleanDescriptor(descriptor);
+  scrubToUnicode(ctx, font, target, everUsed);
+  cleanDescriptor(getDict(ctx, font, 'FontDescriptor'));
 }
 
 /** 符号を詰め直す割り当て。1 バイトの 32（語間 Tw がかかる）は動かさない */
@@ -533,117 +447,6 @@ function rewriteEmbeddedCMap(ctx: PDFContext, font: PDFDict, model: FontModel, u
   }
 }
 
-async function scrubComposite(
-  ctx: PDFContext, font: PDFDict, model: FontModel, drop: Set<number>, used: Set<number>, stats: FontScrubStats,
-): Promise<Map<number, number> | null> {
-  const descendants = getArray(ctx, font, 'DescendantFonts');
-  const cidFont = descendants ? resolve(ctx, descendants.get(0)) : undefined;
-  if (!(cidFont instanceof PDFDict) || !model.cidOf) return null;
-  const usedCids = new Set([...used].map((c) => model.cidOf!(c)));
-  const dropCids = new Set([...drop].map((c) => model.cidOf!(c)).filter((c) => !usedCids.has(c)));
-  const descriptor = getDict(ctx, cidFont, 'FontDescriptor');
-
-  // 幅
-  const writeWidths = (key: 'W' | 'W2') => {
-    const arr = getArray(ctx, cidFont, key);
-    if (!arr) return;
-    const out: PDFObject[] = [];
-    if (key === 'W') {
-      const w = parseW(ctx, arr);
-      for (const [cid, width] of [...w.entries()].sort((a, b) => a[0] - b[0])) {
-        if (dropCids.has(cid)) continue;
-        out.push(PDFNumber.of(cid), ctx.obj([width]));
-      }
-    } else {
-      const w2 = parseW2(ctx, arr);
-      for (const [cid, v] of [...w2.entries()].sort((a, b) => a[0] - b[0])) {
-        if (dropCids.has(cid)) continue;
-        out.push(PDFNumber.of(cid), ctx.obj(v));
-      }
-    }
-    cidFont.set(PDFName.of(key), ctx.obj(out));
-  };
-  writeWidths('W');
-  writeWidths('W2');
-
-  rewriteEmbeddedCMap(ctx, font, model, used);
-  const enc = get(ctx, font, 'Encoding');
-
-  // 字形
-  let codeRemap: Map<number, number> | null = null;
-  if (getName(ctx, cidFont, 'Subtype') === 'CIDFontType2') {
-    const tt = loadTrueType(ctx, descriptor);
-    if (tt && descriptor) {
-      const mapObj = get(ctx, cidFont, 'CIDToGIDMap');
-      let toGid = (cid: number) => cid;
-      if (mapObj instanceof PDFStream) {
-        const table = streamBytes(ctx, mapObj);
-        toGid = (cid) => (cid * 2 + 1 < table.length ? (table[cid * 2] << 8) | table[cid * 2 + 1] : 0);
-      }
-      const usedGids = new Set([...usedCids].map(toGid));
-      const dropGids = new Set([...dropCids].map(toGid).filter((g) => !usedGids.has(g)));
-      if (dropGids.size > 0) {
-        const gidMap = compactFontFile2(ctx, descriptor, tt.bytes, dropGids, stats);
-        if (gidMap) {
-          const encName = enc instanceof PDFName ? enc.decodeText() : undefined;
-          const identity = !(mapObj instanceof PDFStream) && (encName === 'Identity-H' || encName === 'Identity-V');
-          if (identity) {
-            // 符号 = CID = 字形の番号。字形の番号を詰めたので、符号（CID）も同じく詰め直す（符号の穴も残さない）
-            codeRemap = new Map();
-            for (const c of used) {
-              const ng = gidMap.get(c);
-              if (ng !== undefined) codeRemap.set(c, ng);
-            }
-            const w = parseW(ctx, getArray(ctx, cidFont, 'W'));
-            const nw: PDFObject[] = [];
-            for (const [oc, nc] of [...codeRemap.entries()].sort((a, b) => a[1] - b[1])) {
-              const width = w.get(oc);
-              if (width !== undefined) nw.push(PDFNumber.of(nc), ctx.obj([width]));
-            }
-            cidFont.set(PDFName.of('W'), ctx.obj(nw));
-            const w2 = parseW2(ctx, getArray(ctx, cidFont, 'W2'));
-            if (w2.size > 0) {
-              const nw2: PDFObject[] = [];
-              for (const [oc, nc] of [...codeRemap.entries()].sort((a, b) => a[1] - b[1])) {
-                const v = w2.get(oc);
-                if (v) nw2.push(PDFNumber.of(nc), ctx.obj(v));
-              }
-              cidFont.set(PDFName.of('W2'), ctx.obj(nw2));
-            }
-          } else {
-            // CID はそのままにし、CID → 新しい字形の番号の表を明示する
-            const maxCid = Math.max(0, ...usedCids);
-            const table = new Uint8Array((maxCid + 1) * 2);
-            for (const cid of usedCids) {
-              const ng = gidMap.get(toGid(cid)) ?? 0;
-              table[cid * 2] = (ng >> 8) & 0xff;
-              table[cid * 2 + 1] = ng & 0xff;
-            }
-            cidFont.set(PDFName.of('CIDToGIDMap'), ctx.register(ctx.flateStream(table)));
-          }
-        }
-      }
-    } else {
-      unembed(ctx, descriptor, stats);
-      // 読めない FontFile2 も外す
-      if (descriptor?.has(PDFName.of('FontFile2')) && dropCids.size > 0) {
-        descriptor.delete(PDFName.of('FontFile2'));
-        stats.fontsUnembedded++;
-      }
-    }
-  } else if (dropCids.size > 0) {
-    unembed(ctx, descriptor, stats);
-  }
-  if (codeRemap) {
-    scrubToUnicode(ctx, font, new Set(), undefined, codeRemap);
-    cleanDescriptor(descriptor);
-    return codeRemap;
-  }
-  scrubToUnicode(ctx, font, drop);
-  cleanDescriptor(descriptor);
-  return null;
-}
-
 /** CID → 幅（W）を、使う CID の分だけ、連続する CID をまとめた同じ形で書く */
 function writeCanonicalW(ctx: PDFContext, cidFont: PDFDict, entries: [number, number[]][], key: 'W' | 'W2'): void {
   const out: PDFObject[] = [];
@@ -737,51 +540,6 @@ async function normalizeComposite(
   return codeRemap;
 }
 
-/** 単純フォント（Type3 以外）を同じ形に書き直す。埋め込みの TrueType は使う字形だけに詰める */
-function normalizeSimple(ctx: PDFContext, font: PDFDict, drop: Set<number>, used: Set<number>, removed: Set<number>, stats: FontScrubStats): void {
-  const descriptor = getDict(ctx, font, 'FontDescriptor');
-  const tt = loadTrueType(ctx, descriptor);
-  if (tt && descriptor) {
-    const r = resolveSimpleGids(ctx, font, tt.tt, used);
-    if (r.certain) {
-      const keep = new Set([0, ...r.gids]);
-      const dropGids = new Set<number>();
-      for (let g = 1; g < tt.tt.numGlyphs; g++) if (!keep.has(g)) dropGids.add(g);
-      const removedGids = resolveSimpleGids(ctx, font, tt.tt, drop).gids;
-      try {
-        const c = compactTrueType(tt.bytes, dropGids);
-        replaceFontFile2(ctx, descriptor, c.font);
-        for (const g of removedGids) if (c.dropped.has(g)) stats.glyphsScrubbed++;
-      } catch {
-        if (drop.size > 0) {
-          descriptor.delete(PDFName.of('FontFile2'));
-          stats.fontsUnembedded++;
-        }
-      }
-    } else if (drop.size > 0) {
-      // 使う字の字形を確かめられない（詰めると残す字が描けなくなるかもしれない）: フォントのデータごと外す
-      descriptor.delete(PDFName.of('FontFile2'));
-      stats.fontsUnembedded++;
-    }
-  } else if (drop.size > 0) {
-    unembed(ctx, descriptor, stats);
-    if (descriptor?.has(PDFName.of('FontFile2'))) {
-      descriptor.delete(PDFName.of('FontFile2'));
-      stats.fontsUnembedded++;
-    }
-  }
-  // 幅・名前・ToUnicode は使う符号の分だけ（使わない符号にも入れる流儀のフォントは、そのまま）
-  const everUsed = new Set([...used, ...removed]);
-  const unused = new Set<number>();
-  for (let c = 0; c < 256; c++) if (!used.has(c)) unused.add(c);
-  if (!fillsUnusedCodes(ctx, font, everUsed)) {
-    zeroWidths(ctx, font, unused);
-    rebuildDifferences(ctx, font, unused);
-  }
-  scrubToUnicode(ctx, font, unused, everUsed);
-  cleanDescriptor(descriptor);
-}
-
 /** フォームの欄の外観を作り直すのに使うフォント（AcroForm の DR）。使う字が決まっていないので、詰めない */
 function formFonts(doc: PDFDocument): Set<PDFDict> {
   const ctx = doc.context;
@@ -795,9 +553,85 @@ function formFonts(doc: PDFDocument): Set<PDFDict> {
   return out;
 }
 
+/** 字形のデータ（FontFile2）を共有するフォントの 1 つ分 */
+interface GlyphMember {
+  descriptor: PDFDict;
+  usedGids: Set<number>;
+  dropGids: Set<number>;
+  /** 消した字の字形を特定できない */
+  unknown: boolean;
+  composite: boolean;
+}
+
+/** 元のフォントの番号のまま、使わない字形を空にして埋め込んだ形か（Word などの部分集合や、フォントを丸ごと入れたもの） */
+function keepsOriginalNumbering(tt: TrueTypeInfo): boolean {
+  if (tt.numGlyphs > 300) return true;
+  let empty = 0;
+  for (let g = 1; g < tt.numGlyphs; g++) if (!tt.glyphBox(g)) empty++;
+  return empty >= Math.max(8, tt.numGlyphs / 4);
+}
+
+/**
+ * 字形のデータを共有するフォントをまとめて、どのフォントでももう使わない、消した字の字形を消す。
+ * 番号を詰めるのは、使う字形だけを詰めて入れた形の単純フォントだけ（単純フォントは字形の番号をフォントの中の cmap で引くので、
+ * 詰めても cmap を書き直せば済む）。それ以外は、その場で空にして番号を変えない:
+ * - 元の番号のまま使わない字形を空にした形では、詰めると残る字形の番号が消した数だけずれ、元のフォントと比べて消した字形の位置が分かる
+ * - 複合フォントは、ビューアーによって CID をそのまま字形の番号にしたり、フォントの cmap で引いたりする
+ */
+function scrubGlyphGroup(ctx: PDFContext, ff2: PDFStream, members: GlyphMember[], stats: FontScrubStats): void {
+  const keep = new Set<number>([0]);
+  const drop = new Set<number>();
+  for (const m of members) for (const g of m.usedGids) keep.add(g);
+  for (const m of members) for (const g of m.dropGids) if (!keep.has(g)) drop.add(g);
+  const descriptors = new Set(members.map((m) => m.descriptor));
+  if (members.some((m) => m.unknown)) {
+    // 消した字の字形を特定できない: フォントのデータごと外す
+    for (const d of descriptors) d.delete(PDFName.of('FontFile2'));
+    stats.fontsUnembedded++;
+    return;
+  }
+  if (drop.size === 0) return;
+  let bytes: Uint8Array;
+  let tt: TrueTypeInfo;
+  try {
+    bytes = streamBytes(ctx, ff2);
+    tt = parseTrueType(bytes);
+  } catch {
+    for (const d of descriptors) d.delete(PDFName.of('FontFile2'));
+    stats.fontsUnembedded++;
+    return;
+  }
+  try {
+    const inPlace = members.some((m) => m.composite) || keepsOriginalNumbering(tt);
+    const r = inPlace ? scrubTrueType(bytes, drop) : compactTrueType(bytes, drop);
+    stats.glyphsScrubbed += r.dropped.size;
+    const s = ctx.flateStream(r.font);
+    s.dict.set(PDFName.of('Length1'), PDFNumber.of(r.font.length));
+    const ref = ctx.register(s);
+    for (const d of descriptors) d.set(PDFName.of('FontFile2'), ref);
+  } catch {
+    for (const d of descriptors) d.delete(PDFName.of('FontFile2'));
+    stats.fontsUnembedded++;
+  }
+}
+
+/** 複合フォントを、使う字形だけに詰めて同じ形に書き直してよいか（標準の Identity で、ほかのフォントと何も共有しない） */
+function canNormalizeComposite(ctx: PDFContext, font: PDFDict, cidFont: PDFDict, shared: boolean): boolean {
+  if (shared || getName(ctx, cidFont, 'Subtype') !== 'CIDFontType2') return false;
+  const enc = get(ctx, font, 'Encoding');
+  if (!(enc instanceof PDFName) || !['Identity-H', 'Identity-V'].includes(enc.decodeText())) return false;
+  const info = getDict(ctx, cidFont, 'CIDSystemInfo');
+  const text = (k: string) => {
+    const v = get(ctx, info, k) as { decodeText?: () => string } | undefined;
+    return v?.decodeText?.();
+  };
+  return text('Registry') === 'Adobe' && text('Ordering') === 'Identity';
+}
+
 /**
  * 消した文字の符号（フォントごと）のうち、文書のどこでももう使われていないものを、フォントから消す。
- * 文書の中で使われるほかのフォントも、同じ形に書き直す（字を消したフォントだけが書き換わって目立たないように）。
+ * 字を消したフォントだけが書き換わると、それ自体が印になるので、書き直しても描き方が変わらないことの確かな
+ * フォント（Type3、標準の Identity の Type0）は、字を消したかどうかに関わらず同じ形に書き直す。
  * 墨消しの処理（content-redactor）が終わった後、文書の掃除（sanitize）の前に呼ぶ。
  */
 export async function scrubFonts(
@@ -811,43 +645,157 @@ export async function scrubFonts(
   const ctx = doc.context;
   const usage = await collectFontUsage(doc, 'all', fontCache, cmapLoader);
   const keepAsIs = formFonts(doc);
-  const recodeMaps = new Map<PDFDict, { map: Map<number, number>; bytes: number }>();
-  for (const font of new Set([...usage.keys(), ...removedCodes.keys()])) {
+  const fonts = [...new Set([...usage.keys(), ...removedCodes.keys()])];
+
+  // フォントごとの情報と、ほかのフォントと共有する部品（CIDFont、FontDescriptor、字形のデータ）
+  interface Info {
+    font: PDFDict; removed: Set<number>; used: Set<number>; drop: Set<number>; subtype?: string;
+    model: FontModel | null; cidFont?: PDFDict; descriptor?: PDFDict; ff2?: PDFStream;
+  }
+  const infos: Info[] = [];
+  const refs = new Map<PDFObject, number>();
+  for (const font of fonts) {
     const removed = removedCodes.get(font) ?? new Set<number>();
     const used = usage.get(font) ?? new Set<number>();
-    const drop = new Set([...removed].filter((c) => !used.has(c)));
-    const normalize = !keepAsIs.has(font);
-    if (!normalize && drop.size === 0) continue;
-    if (drop.size > 0) stats.fontsScrubbed++;
-    const subtype = getName(ctx, font, 'Subtype');
-    if (subtype === 'Type0') {
-      let model: FontModel | null = null;
+    const info: Info = { font, removed, used, drop: new Set([...removed].filter((c) => !used.has(c))), subtype: getName(ctx, font, 'Subtype'), model: null };
+    if (info.subtype === 'Type0') {
       try {
-        model = await (fontCache.get(font) ?? createFontModel(ctx, font, cmapLoader));
+        info.model = await (fontCache.get(font) ?? createFontModel(ctx, font, cmapLoader));
       } catch {
-        model = null;
+        info.model = null;
       }
-      if (model) {
-        const remap = normalize ? await normalizeComposite(ctx, font, model, drop, used, stats) : await scrubComposite(ctx, font, model, drop, used, stats);
-        if (remap) recodeMaps.set(font, { map: remap, bytes: 2 });
-      }
-    } else if (subtype === 'Type3') {
-      if (normalize) {
-        const names = simpleNames(ctx, font);
-        const keptNames = new Set([...used].map((c) => names[c]));
-        stats.glyphsScrubbed += new Set([...drop].map((c) => names[c]).filter((n) => n && !keptNames.has(n))).size;
-      } else {
-        scrubSimple(ctx, font, drop, used, removed, stats);
-      }
+      const descendants = getArray(ctx, font, 'DescendantFonts');
+      const cf = descendants ? resolve(ctx, descendants.get(0)) : undefined;
+      if (cf instanceof PDFDict) info.cidFont = cf;
+    }
+    info.descriptor = getDict(ctx, info.cidFont ?? font, 'FontDescriptor');
+    const ff2 = get(ctx, info.descriptor, 'FontFile2');
+    if (ff2 instanceof PDFStream) info.ff2 = ff2;
+    for (const o of [info.cidFont, info.descriptor, info.ff2]) if (o) refs.set(o, (refs.get(o) ?? 0) + 1);
+    infos.push(info);
+  }
+  const isShared = (i: Info) => [i.cidFont, i.descriptor, i.ff2].some((o) => o && refs.get(o)! > 1);
+  const cidsOf = (i: Info, codes: Set<number>) => new Set([...codes].map((c) => i.model!.cidOf!(c)));
+  // 同じ CIDFont を使うフォントで、使う CID を合わせる（幅の表は CIDFont にある）
+  const usedCidsByCidFont = new Map<PDFDict, Set<number>>();
+  for (const i of infos) {
+    if (!i.cidFont || !i.model?.cidOf) continue;
+    const set = usedCidsByCidFont.get(i.cidFont) ?? new Set<number>();
+    for (const c of cidsOf(i, i.used)) set.add(c);
+    usedCidsByCidFont.set(i.cidFont, set);
+  }
+
+  const recodeMaps = new Map<PDFDict, { map: Map<number, number>; bytes: number }>();
+  const glyphGroups = new Map<PDFStream, GlyphMember[]>();
+  const widthsDone = new Set<PDFDict>();
+  for (const i of infos) {
+    const { font, used, drop, removed } = i;
+    const normalize = !keepAsIs.has(font);
+    if (drop.size > 0) stats.fontsScrubbed++;
+    if (i.subtype === 'Type3') {
+      const names = simpleNames(ctx, font);
+      const keptNames = new Set([...used].map((c) => names[c]));
+      stats.glyphsScrubbed += new Set([...drop].map((c) => names[c]).filter((n) => n && !keptNames.has(n))).size;
       recodeMaps.set(font, { map: recodeType3(ctx, font, used, normalize), bytes: 1 });
-    } else if (normalize) {
-      normalizeSimple(ctx, font, drop, used, removed, stats);
-    } else {
-      scrubSimple(ctx, font, drop, used, removed, stats);
+      continue;
+    }
+    if (i.subtype === 'Type0') {
+      if (!i.model?.cidOf || !i.cidFont) continue;
+      if (normalize && canNormalizeComposite(ctx, font, i.cidFont, isShared(i))) {
+        const remap = await normalizeComposite(ctx, font, i.model, drop, used, stats);
+        if (remap) recodeMaps.set(font, { map: remap, bytes: 2 });
+        continue;
+      }
+      // 番号を変えずに、消した字の分だけを消す
+      const usedCids = usedCidsByCidFont.get(i.cidFont) ?? new Set<number>();
+      const dropCids = new Set([...cidsOf(i, drop)].filter((c) => !usedCids.has(c)));
+      rewriteEmbeddedCMap(ctx, font, i.model, used);
+      if (!widthsDone.has(i.cidFont)) {
+        widthsDone.add(i.cidFont);
+        const allDrop = new Set<number>();
+        for (const j of infos) {
+          if (j.cidFont !== i.cidFont || !j.model?.cidOf) continue;
+          for (const c of cidsOf(j, j.drop)) if (!usedCids.has(c)) allDrop.add(c);
+        }
+        scrubCidWidths(ctx, i.cidFont, allDrop, usedCids);
+      }
+      scrubToUnicode(ctx, font, drop, new Set([...used, ...removed]));
+      if (i.ff2 && i.descriptor) {
+        const mapObj = get(ctx, i.cidFont, 'CIDToGIDMap');
+        let toGid = (cid: number) => cid;
+        if (mapObj instanceof PDFStream) {
+          const table = streamBytes(ctx, mapObj);
+          toGid = (cid) => (cid * 2 + 1 < table.length ? (table[cid * 2] << 8) | table[cid * 2 + 1] : 0);
+        }
+        const members = glyphGroups.get(i.ff2) ?? [];
+        members.push({
+          descriptor: i.descriptor, composite: true, unknown: false,
+          usedGids: new Set([...cidsOf(i, used)].map(toGid)), dropGids: new Set([...dropCids].map(toGid)),
+        });
+        glyphGroups.set(i.ff2, members);
+      } else if (dropCids.size > 0) {
+        unembed(ctx, i.descriptor, stats);
+      }
+      cleanDescriptor(i.descriptor);
+      continue;
+    }
+    // 単純フォント
+    simpleMetadata(ctx, font, drop, used, removed, normalize);
+    if (i.ff2 && i.descriptor) {
+      let tt: TrueTypeInfo | null = null;
+      try {
+        tt = parseTrueType(streamBytes(ctx, i.ff2));
+      } catch {
+        tt = null;
+      }
+      const members = glyphGroups.get(i.ff2) ?? [];
+      if (tt) {
+        const unknown = [...drop].some((c) => resolveSimpleGids(ctx, font, tt!, [c]).gids.size === 0);
+        members.push({
+          descriptor: i.descriptor, composite: false, unknown,
+          usedGids: resolveSimpleGids(ctx, font, tt, used).gids, dropGids: resolveSimpleGids(ctx, font, tt, drop).gids,
+        });
+      } else {
+        members.push({ descriptor: i.descriptor, composite: false, unknown: drop.size > 0, usedGids: new Set(), dropGids: new Set() });
+      }
+      glyphGroups.set(i.ff2, members);
+    } else if (drop.size > 0) {
+      unembed(ctx, i.descriptor, stats);
     }
   }
+  for (const [ff2, members] of glyphGroups) scrubGlyphGroup(ctx, ff2, members, stats);
   if (recodeMaps.size > 0) await rewriteFontCodes(doc, recodeMaps);
   return stats;
+}
+
+/**
+ * CIDFont の幅（W / W2）から、消した CID の分を消す。元の表の流儀に合わせる:
+ * 使わない CID にも 0 でない幅を入れる表はそのまま、使わない CID を 0 で入れる表（Skia）は 0 にし、使う CID だけの表からは抜く
+ */
+function scrubCidWidths(ctx: PDFContext, cidFont: PDFDict, dropCids: Set<number>, usedCids: Set<number>): void {
+  if (dropCids.size === 0) return;
+  const w = parseW(ctx, getArray(ctx, cidFont, 'W'));
+  let zero = 0;
+  let nonZero = 0;
+  for (const [cid, width] of w) {
+    if (usedCids.has(cid) || dropCids.has(cid)) continue;
+    if (width) nonZero++;
+    else zero++;
+  }
+  if (nonZero > zero) return;
+  const entries: [number, number[]][] = [];
+  for (const [cid, width] of w) {
+    if (dropCids.has(cid)) {
+      if (zero > 0) entries.push([cid, [0]]);
+    } else {
+      entries.push([cid, [width]]);
+    }
+  }
+  if (cidFont.has(PDFName.of('W'))) writeCanonicalW(ctx, cidFont, entries, 'W');
+  const w2 = parseW2(ctx, getArray(ctx, cidFont, 'W2'));
+  if (cidFont.has(PDFName.of('W2'))) {
+    writeCanonicalW(ctx, cidFont, [...w2.entries()].filter(([c]) => !dropCids.has(c)).map(([c, v]) => [c, [...v]]), 'W2');
+  }
 }
 
 export type { PDFArray };
