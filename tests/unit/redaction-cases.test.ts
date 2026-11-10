@@ -921,6 +921,16 @@ describe('資源の後始末', () => {
   });
 });
 
+describe('大きな頁', () => {
+  it('命令が数十万ある頁でも落ちない', async () => {
+    const parts: string[] = [];
+    for (let i = 0; i < 70000; i++) parts.push(`${i % 500} ${(i * 7) % 800} m ${(i % 500) + 1} ${((i * 7) % 800) + 1} l S`);
+    const before = await rawPage(parts.join('\n'));
+    const after = await redact(before, [{ x: 100, y: 100, width: 50, height: 50 }]);
+    expect(after.length).toBeGreaterThan(0);
+  }, 60000);
+});
+
 describe('安全に消せないときは止める', () => {
   it('幅の分からないフォントの文字が範囲にかかり得るなら、RedactionError で止める', async () => {
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (SECRET) Tj ET', (doc, page) => {

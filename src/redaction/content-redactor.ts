@@ -469,7 +469,11 @@ export async function redactOperations(
     const closesLast = ['s', 'b', 'b*'].includes(p);
     if (closesLast && paths.length > 0) paths[paths.length - 1].closed = true;
 
-    const original = (): Operation[] => [...paths.flatMap((s) => s.ops), ...(clip ? [clip] : []), paint];
+    const original = (): Operation[] => {
+      const o: Operation[] = [];
+      pushAll(o, ...paths.map((s) => s.ops), clip ? [clip] : [], [paint]);
+      return o;
+    };
 
     const ctm = gs.ctm;
     const halfWidth = stroke ? (Math.max(gs.lineWidth, 0) * maxScale(ctm)) / 2 + 0.5 : 0;
@@ -504,8 +508,8 @@ export async function redactOperations(
         if (closesLast && sp === paths[paths.length - 1] && sp.ops[sp.ops.length - 1]?.op !== 'h' && !sp.rect) {
           ops.push({ op: 'h', operands: [] });
         }
-        result.push(...ops);
-        if (fillAndStroke) strokeResult.push(...ops);
+        pushAll(result, ops);
+        if (fillAndStroke) pushAll(strokeResult, ops);
       };
       if (devPts.length === 0) {
         keepAsIs();
@@ -570,16 +574,16 @@ export async function redactOperations(
     const ops: Operation[] = [];
     if (clip) {
       // 切り抜きは元の形のまま効かせ、塗りと線は書き換えた形で描く
-      ops.push(...paths.flatMap((s) => s.ops), clip, { op: 'n', operands: [] });
+      pushAll(ops, ...paths.map((s) => s.ops), [clip, { op: 'n', operands: [] }]);
     }
     if (fillAndStroke) {
       // 塗り（範囲を抜いた形）と、線（元の輪郭の範囲の外の部分）を分けて描く
       const fillOp = p === 'B*' || p === 'b*' ? 'f*' : 'f';
-      if (result.length > 0) ops.push(...result, { op: fillOp, operands: [] });
-      if (strokeResult.length > 0) ops.push(...strokeResult, { op: 'S', operands: [] });
+      if (result.length > 0) pushAll(ops, result, [{ op: fillOp, operands: [] }]);
+      if (strokeResult.length > 0) pushAll(ops, strokeResult, [{ op: 'S', operands: [] }]);
       return ops;
     }
-    if (result.length > 0) ops.push(...result, paintOp);
+    if (result.length > 0) pushAll(ops, result, [paintOp]);
     return ops;
   };
 
@@ -613,12 +617,12 @@ export async function redactOperations(
       continue;
     }
     if (PAINT_OPS.has(o.op)) {
-      out.push(...finishPath(o));
+      pushAll(out, finishPath(o));
       continue;
     }
     if (current || subpaths.length > 0) {
       // パスの途中に別の命令（不正だが実在する）。そのまま出す
-      out.push(...subpaths.flatMap((s) => s.ops), ...(current ? current.ops : []), ...(clipOp ? [clipOp] : []));
+      pushAll(out, ...subpaths.map((s) => s.ops), current ? current.ops : [], clipOp ? [clipOp] : []);
       subpaths = [];
       current = null;
       clipOp = null;
@@ -799,7 +803,7 @@ export async function redactOperations(
   }
   const finalOps = out.filter((o) => o.op !== DROPPED);
   out.length = 0;
-  out.push(...finalOps);
+  pushAll(out, finalOps);
   // 差し替えた元の画像・フォーム・属性は、資源に名前が残っていると保存されてしまうので外す
   const used: UsedNames = {
     XObject: new Set(inheritedUse.XObject), Properties: new Set(inheritedUse.Properties), Font: new Set(inheritedUse.Font),
@@ -903,19 +907,19 @@ function subpathPolyline(sp: Subpath, ctm: Matrix): Point[] {
         break;
       case 'c': {
         const pts = flattenCubic(cur, P(0), P(2), P(4));
-        out.push(...pts);
+        pushAll(out, pts);
         cur = P(4);
         break;
       }
       case 'v': {
         const pts = flattenCubic(cur, cur, P(0), P(2));
-        out.push(...pts);
+        pushAll(out, pts);
         cur = P(2);
         break;
       }
       case 'y': {
         const pts = flattenCubic(cur, P(0), P(2), P(2));
-        out.push(...pts);
+        pushAll(out, pts);
         cur = P(2);
         break;
       }
@@ -944,6 +948,11 @@ function keptIntervals(a: Point, b: Point, rects: PdfRect[]): [number, number][]
   }
   const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
   return intervals.filter(([s, e]) => (e - s) * len > 1e-6);
+}
+
+/** 配列に要素を足す（展開して push すると、要素が多いと引数の数の上限を超えるため） */
+function pushAll<T>(target: T[], ...groups: T[][]): void {
+  for (const g of groups) for (const x of g) target.push(x);
 }
 
 /** 出力から外す命令の印 */

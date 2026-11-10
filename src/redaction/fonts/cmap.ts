@@ -76,7 +76,7 @@ export class CMap {
    */
   extend(parent: CMap): void {
     if (this.codespaceRanges.every((r) => r.length === 0)) {
-      for (let n = 0; n < 4; n++) this.codespaceRanges[n].push(...parent.codespaceRanges[n]);
+      for (let n = 0; n < 4; n++) for (const v of parent.codespaceRanges[n]) this.codespaceRanges[n].push(v);
     }
     this.parent = parent;
   }
