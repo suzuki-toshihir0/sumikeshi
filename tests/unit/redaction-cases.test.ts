@@ -1183,6 +1183,30 @@ describe('ほかの所から指されたままの元のデータ', () => {
   });
 });
 
+describe('動く中身（JavaScript など）', () => {
+  it('範囲の外の注釈とフォームの欄の動作（/A の /Next の先、/AA）にある JavaScript も残さない。URI の移動は残す', async () => {
+    const before = await rawPage('BT /F1 12 Tf 50 700 Td (secret) Tj ET', async (doc, page) => {
+      const font = await doc.embedFont(StandardFonts.Helvetica);
+      await font.embed();
+      page.node.setFontDictionary(PDFName.of('F1'), font.ref);
+      const link = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Link', Rect: [50, 100, 150, 120], Border: [0, 0, 0],
+        A: { S: 'URI', URI: PDFString.of('https://example.com/keep'), Next: { S: 'JavaScript', JS: PDFString.of('app.alert(hiddenjs1)') } },
+      }));
+      const widget = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Widget', FT: 'Tx', T: PDFString.of('f1'), Rect: [50, 200, 150, 220],
+        AA: { K: { S: 'JavaScript', JS: PDFString.of('hiddenjs2()') } },
+        A: { S: 'JavaScript', JS: PDFString.of('hiddenjs3()') },
+      }));
+      page.node.set(PDFName.of('Annots'), doc.context.obj([link, widget]));
+      doc.catalog.set(PDFName.of('AcroForm'), doc.context.obj({ Fields: [widget] }));
+    });
+    const after = await redact(before, [{ x: 45, y: 695, width: 60, height: 18 }]);
+    for (const js of ['hiddenjs1', 'hiddenjs2', 'hiddenjs3']) expect(await findEverywhere(after, js)).toEqual([]);
+    expect((await findEverywhere(after, 'https://example.com/keep')).length).toBeGreaterThan(0);
+  });
+});
+
 /** 埋め込みの TrueType の Type0（Identity-H）フォント。toUni は CID → Unicode */
 function type0TrueType(doc: PDFDocument, name: string, ttf: Uint8Array, w: unknown[], toUni: [number, number][]) {
   const bf = toUni.map(([c, u]) => `<${c.toString(16).padStart(4, '0')}> <${u.toString(16).padStart(4, '0')}>`).join(' ');

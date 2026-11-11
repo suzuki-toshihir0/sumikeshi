@@ -42,6 +42,18 @@ export function sanitizeDocument(doc: PDFDocument): void {
   // XFA のフォームは、欄の値の写しを別に持つ
   const acro = getDict(ctx, catalog, 'AcroForm');
   if (acro) acro.delete(PDFName.of('XFA'));
+  // フォームの欄（ウィジェットの親を含む）の動作から、JavaScript などの動く中身を消す
+  const fieldsSeen = new Set<PDFDict>();
+  const sanitizeFields = (arr: PDFArray | undefined, depth: number) => {
+    for (let i = 0; arr && depth < 32 && i < arr.size(); i++) {
+      const f = resolve(ctx, arr.get(i));
+      if (!(f instanceof PDFDict) || fieldsSeen.has(f)) continue;
+      fieldsSeen.add(f);
+      sanitizeActions(ctx, f);
+      sanitizeFields(getArray(ctx, f, 'Kids'), depth + 1);
+    }
+  };
+  sanitizeFields(getArray(ctx, acro, 'Fields'), 0);
 
   for (const page of doc.getPages()) {
     const node = page.node;
@@ -53,7 +65,10 @@ export function sanitizeDocument(doc: PDFDocument): void {
       for (let i = 0; i < annots.size(); i++) {
         const a = resolve(ctx, annots.get(i));
         if (a instanceof PDFDict && getName(ctx, a, 'Subtype') === 'FileAttachment') continue;
-        if (a instanceof PDFDict) a.delete(PDFName.of('StructParent'));
+        if (a instanceof PDFDict) {
+          a.delete(PDFName.of('StructParent'));
+          sanitizeActions(ctx, a);
+        }
         kept.push(annots.get(i));
       }
       if (kept.length !== annots.size()) node.set(PDFName.of('Annots'), ctx.obj(kept));
@@ -67,6 +82,53 @@ export function sanitizeDocument(doc: PDFDocument): void {
 
   collectGarbage(ctx);
   renumberObjects(ctx);
+}
+
+/** 動く中身の動作（スクリプト、外部のプログラムの起動、外部のデータの読み込み） */
+const ACTIVE_ACTIONS = new Set(['JavaScript', 'Launch', 'ImportData', 'RichMediaExecute']);
+
+/**
+ * 注釈やフォームの欄の動作から、動く中身を消す。/AA（ページを開いた、値を変えた、などで動く動作）は丸ごと外し、
+ * /A は /Next でつながる先までたどって、動く中身の動作だけを外す（URI や頁への移動は残す）
+ */
+function sanitizeActions(ctx: PDFContext, d: PDFDict): void {
+  d.delete(PDFName.of('AA'));
+  const clean = (action: PDFObject | undefined, depth: number): PDFObject | undefined => {
+    const a = resolve(ctx, action);
+    if (!(a instanceof PDFDict) || depth > 32) return action;
+    const s = getName(ctx, a, 'S');
+    a.delete(PDFName.of('JS'));
+    const next = a.get(PDFName.of('Next'));
+    if (next !== undefined) {
+      const n = resolve(ctx, next);
+      if (n instanceof PDFArray) {
+        const kept: PDFObject[] = [];
+        for (let i = 0; i < n.size(); i++) {
+          const c = clean(n.get(i), depth + 1);
+          if (c) kept.push(c);
+        }
+        if (kept.length > 0) a.set(PDFName.of('Next'), ctx.obj(kept));
+        else a.delete(PDFName.of('Next'));
+      } else {
+        const c = clean(next, depth + 1);
+        if (c) a.set(PDFName.of('Next'), c);
+        else a.delete(PDFName.of('Next'));
+      }
+    }
+    if (s && ACTIVE_ACTIONS.has(s)) {
+      // この動作は外し、つながる先を代わりに置く
+      return a.get(PDFName.of('Next'));
+    }
+    return action;
+  };
+  const a = d.get(PDFName.of('A'));
+  if (a !== undefined) {
+    const c = clean(a, 0);
+    const r = resolve(ctx, c);
+    if (r instanceof PDFDict) d.set(PDFName.of('A'), c!);
+    else if (r instanceof PDFArray && r.size() > 0) d.set(PDFName.of('A'), r.get(0));
+    else d.delete(PDFName.of('A'));
+  }
 }
 
 /**
