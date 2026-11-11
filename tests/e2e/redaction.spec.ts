@@ -236,4 +236,42 @@ test.describe('ブラウザでの墨消し', () => {
     expect(box[0] + box[2]).toBeGreaterThan(selectedRight + 3);
     expect(box[0] + box[2]).toBeLessThan(nextLeft);
   });
+
+  test('墨消しの処理中は、範囲を足したり別の PDF を開いたりできない（処理中に足した範囲が消されないまま選択から消えない）', async ({ page }) => {
+    // Worker の返事を 3 秒遅らせて、処理中の状態を作る
+    await page.addInitScript(() => {
+      const W = window.Worker;
+      window.Worker = class extends W {
+        set onmessage(fn: ((e: MessageEvent) => void) | null) {
+          super.onmessage = fn ? (e: MessageEvent) => setTimeout(() => fn(e), 3000) : null;
+        }
+      } as typeof Worker;
+    });
+    const dialogs: string[] = [];
+    page.on('dialog', async (d) => {
+      dialogs.push(d.message());
+      await d.dismiss();
+    });
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('cmap.pdf'));
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    await dragPdfRect(page, 595, 842, { x: 111, y: 693, width: 78, height: 25 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+    await page.locator('#btn-redact').click();
+    // 処理中に範囲を足そうとしても足されない
+    await dragPdfRect(page, 595, 842, { x: 50, y: 600, width: 100, height: 25 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+    // 処理中に別の PDF を開こうとしても開かない
+    await page.locator('#file-input').setInputFiles(fixture('chrome.pdf'), { noWaitAfter: true }).catch(() => {});
+    await expect(page.locator('#btn-download')).toBeVisible({ timeout: 10000 });
+    const after = await (async () => {
+      const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#btn-download').click()]);
+      return new Uint8Array(readFileSync((await download.path())!));
+    })();
+    const text = await allText(after);
+    // 墨消ししたのは cmap.pdf で、処理中に足そうとした範囲の字（住所の行）は残る
+    expect(text).not.toContain('花子');
+    expect(text).toContain('架空県');
+  });
 });

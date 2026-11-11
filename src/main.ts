@@ -18,6 +18,10 @@ class App {
 
   private originalBytes: ArrayBuffer | null = null;
   private redactedBytes: Uint8Array | null = null;
+  /** 墨消しの処理中（範囲の追加・削除と、別の PDF を開くことを止める） */
+  private busy = false;
+  /** 開いた文書の番号。処理中に文書が替わったら、古い処理の結果を捨てる */
+  private docRevision = 0;
   private dropZone: HTMLElement;
   private pageWrapper: HTMLElement;
 
@@ -70,6 +74,7 @@ class App {
 
     // 選択クリア
     this.toolbar.onClear = () => {
+      if (this.busy) return;
       this.store.clear();
       this.refreshOverlay();
     };
@@ -82,6 +87,7 @@ class App {
 
     // オーバーレイの墨消し矩形クリック(削除)
     this.overlay.onRectClick = (pageNum, index) => {
+      if (this.busy) return;
       this.store.remove(pageNum, index);
       this.refreshOverlay();
     };
@@ -146,6 +152,11 @@ class App {
   }
 
   private async loadFile(file: File): Promise<void> {
+    if (this.busy) {
+      alert('墨消しの処理中は、ほかの PDF を開けません。処理が終わってから開いてください。');
+      return;
+    }
+    this.docRevision++;
     const fileBytes = await readFileAsArrayBuffer(file);
     // pdf-libで後から使うためにコピーを保持する
     // (pdfjs-distがWorkerにtransferするとdetachedになるため)
@@ -180,15 +191,24 @@ class App {
       return;
     }
 
+    // 処理中は範囲を足したり消したりさせない（処理に渡した範囲と、終わったときに消す範囲がずれないように）
+    this.busy = true;
+    this.selection.disable();
     this.toolbar.setBusy(true);
+    const revision = this.docRevision;
+    let succeeded = false;
     try {
       // 墨消しは Web Worker で動かす（壊れた画像などで終わらなくなっても画面が固まらないように）。
       // Worker に渡すと元の ArrayBuffer は使えなくなるので、写しを渡す
-      this.redactedBytes = await runRedactionInWorker(
+      const result = await runRedactionInWorker(
         () => new Worker(new URL('./redaction/redaction-worker.ts', import.meta.url), { type: 'module' }),
         this.originalBytes.slice(0),
         this.store.getAllRects(),
       );
+      // 処理中に文書が替わっていたら、古い文書の結果は使わない
+      if (revision !== this.docRevision) return;
+      this.redactedBytes = result;
+      succeeded = true;
 
       // 墨消し結果でプレビューを更新する
       // 墨消し済みバイトを新しいoriginalBytesとして保持し、追加の墨消しに備える
@@ -211,7 +231,9 @@ class App {
         alert(`墨消し処理中にエラーが発生しました。今回選んだ範囲の墨消しは行っていません。\n${e.message}`);
       }
     } finally {
+      this.busy = false;
       this.toolbar.setBusy(false);
+      if (!succeeded && revision === this.docRevision) this.selection.enable();
     }
   }
 
