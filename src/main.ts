@@ -214,7 +214,6 @@ class App {
       this.store.clear();
       // 墨消しした範囲の枠も消す（結果の表示に失敗すると描き直されず、枠だけが残る）
       this.overlay.clear();
-      this.toolbar.showDownload();
 
       // 墨消し結果でプレビューを更新する。表示に失敗しても、墨消しは済んでいるので結果は落とせるようにする
       const viewerBytes = result.buffer.slice(0) as ArrayBuffer;
@@ -229,6 +228,8 @@ class App {
       }
       // 描き直す前の文字に掛かっていたブラウザの選択を残さない
       document.getSelection()?.removeAllRanges();
+      // 表示を試みた後に出す（ボタンが見えたら処理は終わっている。表示に失敗しても結果は落とせる）
+      this.toolbar.showDownload();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       console.error('墨消し処理エラー:', e.message, e.stack);
