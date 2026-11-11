@@ -1142,6 +1142,47 @@ describe('注釈・頁の作り', () => {
   });
 });
 
+describe('ほかの所から指されたままの元のデータ', () => {
+  const imageDoc = async (shared: 'inherit' | 'sharedDict', page2DrawsImage: boolean) => {
+    const doc = await PDFDocument.create();
+    const px = pattern(40, 20);
+    const img = doc.context.register(doc.context.flateStream(px, {
+      Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+    }));
+    const res = doc.context.obj({ XObject: { Im0: img } });
+    for (let i = 0; i < 2; i++) {
+      const page = doc.addPage([595, 842]);
+      const content = i === 0 || page2DrawsImage ? 'q 200 0 0 100 100 600 cm /Im0 Do Q' : '0 0 1 1 re f';
+      page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(content)));
+      if (shared === 'inherit') page.node.delete(PDFName.of('Resources'));
+      else page.node.set(PDFName.of('Resources'), res);
+    }
+    if (shared === 'inherit') doc.catalog.Pages().set(PDFName.of('Resources'), res);
+    return { bytes: await doc.save(), px };
+  };
+
+  it('頁が資源を親（Pages）から受け継ぐとき、墨消しした元の画像が親の資源から指されたまま残らない', async () => {
+    const { bytes, px } = await imageDoc('inherit', false);
+    const after = await redact(bytes, [{ x: 150, y: 620, width: 60, height: 40 }], 1);
+    await expectNoStreamContains(after, px);
+  });
+
+  it('2 つの頁が同じ資源の辞書を使うとき、もう一方の頁が描かない元の画像は残らない', async () => {
+    const { bytes, px } = await imageDoc('sharedDict', false);
+    const after = await redact(bytes, [{ x: 150, y: 620, width: 60, height: 40 }], 1);
+    await expectNoStreamContains(after, px);
+  });
+
+  it('もう一方の頁が同じ画像を描くなら、その頁の画像は元のまま残る', async () => {
+    const { bytes } = await imageDoc('inherit', true);
+    const after = await redact(bytes, [{ x: 150, y: 620, width: 60, height: 40 }], 1);
+    const b2 = await extractImages(bytes, 2);
+    const a2 = await extractImages(after, 2);
+    expect(a2).toHaveLength(1);
+    for (let y = 0; y < 20; y++) for (let x = 0; x < 40; x++) expect(a2[0].gray(x, y)).toBe(b2[0].gray(x, y));
+  });
+});
+
 /** 埋め込みの TrueType の Type0（Identity-H）フォント。toUni は CID → Unicode */
 function type0TrueType(doc: PDFDocument, name: string, ttf: Uint8Array, w: unknown[], toUni: [number, number][]) {
   const bf = toUni.map(([c, u]) => `<${c.toString(16).padStart(4, '0')}> <${u.toString(16).padStart(4, '0')}>`).join(' ');

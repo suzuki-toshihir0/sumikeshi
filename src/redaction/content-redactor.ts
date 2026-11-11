@@ -8,7 +8,7 @@
  * - Form XObject: 中身を同じように処理し、変わったら写しを作って差し替える。
  * - 範囲にかかった部分を囲む ActualText / Alt を消す。
  */
-import { PDFContext, PDFDict, PDFName, PDFRef, PDFStream } from 'pdf-lib';
+import { PDFContext, PDFDict, PDFName, PDFObject, PDFRef, PDFStream } from 'pdf-lib';
 import type { PdfRect } from '../utils/coordinates';
 import type { Operand, Operation } from './content/lexer';
 import { parseContentStream } from './content/lexer';
@@ -54,6 +54,8 @@ export interface RedactionContext {
   removedCodes: Map<PDFDict, Set<number>>;
   /** 描かれるもの（字・パスの辺・画像）の頁の上の形を知らせる。黒い四角を広げる先を決めるのに使う */
   observe?: (o: Observed) => void;
+  /** 墨消しで差し替えた元の画像・Form（ほかの資源から指されたまま残らないよう、後で外すため） */
+  replacedOriginals?: Set<PDFObject>;
 }
 
 /** 頁に描かれるもの 1 つの形（頁の座標）。字は文字の進む向き（dir、単位ベクトル）も持つ */
@@ -807,7 +809,9 @@ export async function redactOperations(
           out.push(o);
           break;
         }
+        const original = resources.lookupRaw('XObject', n.value);
         const replaced = await handleXObject(rc, n.value, resources, gs, inheritedUse);
+        if (replaced && original) rc.replacedOriginals?.add(original);
         if (replaced) {
           changed = true;
           markTouched();

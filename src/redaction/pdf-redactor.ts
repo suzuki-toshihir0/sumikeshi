@@ -10,12 +10,13 @@
  * 安全に消せないもの（幅の分からないフォントで範囲にかかり得る文字、読めない形式の画像など）があれば、
  * 出力せずに RedactionError を投げる。
  */
-import { PDFArray, PDFDict, PDFDocument, PDFName, PDFStream, EncryptedPDFError } from 'pdf-lib';
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFObject, PDFStream, EncryptedPDFError } from 'pdf-lib';
 import type { PdfRect } from '../utils/coordinates';
 import { parseContentStream, type Operation } from './content/lexer';
 import { serializeOperations } from './content/writer';
 import { redactOperations, type Observed, type RedactionContext, type RedactionStats } from './content-redactor';
 import { extendTextRects } from './extend-boxes';
+import { pruneReplacedOriginals } from './prune-originals';
 import { IDENTITY } from './geometry';
 import { ResourceEditor } from './resources';
 import { removeOverlappingAnnotations, pruneFormFields } from './annotations';
@@ -246,6 +247,7 @@ export async function redactPdf(
   const cmapLoader = options.cmapLoader ?? defaultCMapLoader();
   const removedWidgets = new Set<PDFDict>();
   const removedCodes = new Map<PDFDict, Set<number>>();
+  const replacedOriginals = new Set<PDFObject>();
 
   for (const [pageNumber, rawRects] of redactionMap) {
     let rects = mergeRects(normalizeRects(rawRects));
@@ -279,7 +281,7 @@ export async function redactPdf(
     }
     const resources = new ResourceEditor(ctx, resDict instanceof PDFDict ? resDict : undefined);
     const rc: RedactionContext = {
-      ctx, rects, cmapLoader, fontCache, stats, formStack: new Set(), pageNumber, removedCodes,
+      ctx, rects, cmapLoader, fontCache, stats, formStack: new Set(), pageNumber, removedCodes, replacedOriginals,
     };
     const result = await redactOperations(rc, ops, resources, IDENTITY);
 
@@ -293,6 +295,8 @@ export async function redactPdf(
     }
   }
 
+  // 差し替えた元の画像・Form を、ほかの頁や親（Pages）の資源から指されたまま残さない
+  pruneReplacedOriginals(doc, replacedOriginals);
   if (removedWidgets.size > 0) pruneFormFields(ctx, doc.catalog, removedWidgets);
   // 消した文字の字形・幅・名前を、フォントからも消す（もう使われない符号だけ）
   const fontStats = await scrubFonts(doc, removedCodes, fontCache, cmapLoader);
