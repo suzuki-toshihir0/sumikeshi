@@ -115,6 +115,28 @@ export function pruneFormFields(ctx: PDFContext, catalog: PDFDict, removedWidget
   };
   const keptFields = prune(fields, 0);
   acro.set(PDFName.of('Fields'), ctx.obj(keptFields));
+  // 計算の順（/CO）からも外す（残すと、消した欄が値ごとたどれて保存される）
+  const co = getArray(ctx, acro, 'CO');
+  if (co) {
+    const removedField = (d: PDFDict): boolean => {
+      if (removedWidgets.has(d)) return true;
+      const kids = getArray(ctx, d, 'Kids');
+      if (!kids) return false;
+      for (let i = 0; i < kids.size(); i++) {
+        const k = resolve(ctx, kids.get(i));
+        if (k instanceof PDFDict && !removedField(k)) return false;
+      }
+      return kids.size() > 0;
+    };
+    const keptCo: PDFObject[] = [];
+    for (let i = 0; i < co.size(); i++) {
+      const d = resolve(ctx, co.get(i));
+      if (d instanceof PDFDict && removedField(d)) continue;
+      keptCo.push(co.get(i));
+    }
+    if (keptCo.length > 0) acro.set(PDFName.of('CO'), ctx.obj(keptCo));
+    else acro.delete(PDFName.of('CO'));
+  }
 }
 
 export function isRef(o: PDFObject | undefined): o is PDFRef {

@@ -1243,6 +1243,83 @@ describe('Form の中の字のフォントの数え方', () => {
   });
 });
 
+describe('2 回目のレビューの指摘', () => {
+  it('2 つの頁で使う同じ Form の字の符号を、2 回書き換えない（2 回目で字が化けない）', async () => {
+    const doc = await PDFDocument.create();
+    // 符号は 34（"）から。詰め直した符号（33 から）と元の符号が重なるので、2 回書き換えると字が変わる
+    const names = ['ga', 'gb', 'gc', 'gd'];
+    const procs: Record<string, ReturnType<PDFDocument['context']['register']>> = {};
+    names.forEach((nm) => { procs[nm] = doc.context.register(doc.context.stream('500 0 0 0 400 700 d1 0 0 400 700 re f')); });
+    const bf = names.map((nm, i) => `<${(34 + i).toString(16)}> <00${(97 + i).toString(16)}>`).join(' ');
+    const t3 = doc.context.register(doc.context.obj({
+      Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 400, 700], FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+      CharProcs: procs, Encoding: { Type: 'Encoding', Differences: [34, ...names.map((nm) => PDFName.of(nm))] },
+      FirstChar: 34, LastChar: 37, Widths: [500, 500, 500, 500], Resources: {},
+      ToUnicode: doc.context.register(doc.context.stream(`/CIDInit /ProcSet findresource begin 12 dict begin begincmap
+1 begincodespacerange <00> <FF> endcodespacerange 4 beginbfchar ${bf} endbfchar endcmap end end`)),
+    }));
+    const fm = doc.context.register(doc.context.stream('BT /T3 12 Tf 50 600 Td <2325> Tj ET', {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 595, 842], Resources: { Font: { T3: t3 } },
+    }));
+    const contents = ['BT /T3 12 Tf 50 700 Td <22> Tj ET /Fm0 Do BT /T3 12 Tf 50 500 Td <24> Tj ET', '/Fm0 Do'];
+    for (let i = 0; i < 2; i++) {
+      const page = doc.addPage([595, 842]);
+      page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(contents[i])));
+      page.node.setFontDictionary(PDFName.of('T3'), t3);
+      page.node.setXObject(PDFName.of('Fm0'), fm);
+    }
+    const before = await doc.save();
+    // 1 頁目の c を消す（a, b, d が残り、符号を詰め直す）
+    const after = await redact(before, [{ x: 45, y: 495, width: 30, height: 15 }], 1);
+    expect((await allText(after, 1)).replace(/\s/g, '')).toBe('abd');
+    expect((await allText(after, 2)).replace(/\s/g, '')).toBe('bd');
+  });
+
+  it('文字列の中にそのまま入った改行（CR、CRLF）は、ビューアーと同じく LF の 1 バイトとして読む', async () => {
+    const { parseContentStream } = await import('../../src/redaction/content/lexer');
+    const ops = parseContentStream(new Uint8Array(Buffer.from('(a\rb\r\nc\nd) Tj', 'latin1')));
+    const str = ops[0].operands[0];
+    expect(str.type === 'string' ? [...str.bytes] : []).toEqual([0x61, 0x0a, 0x62, 0x0a, 0x63, 0x0a, 0x64]);
+  });
+
+  it('斜めの変換（シアー）でも、線の太さの広がりを小さく見積もらない', async () => {
+    const { maxScale } = await import('../../src/redaction/geometry');
+    // [1 0 1 0.1]: 横方向の太さは √2 倍近くまで広がる
+    expect(maxScale([1, 0, 1, 0.1, 0, 0])).toBeGreaterThanOrEqual(Math.SQRT2);
+    expect(maxScale([2, 0, 0, 3, 0, 0])).toBeCloseTo(3, 6);
+  });
+
+  it('消したフォームの欄が、計算の順（/CO）から指されたまま残らない', async () => {
+    const before = await rawPage('0 0 1 1 re f', (doc, page) => {
+      const widget = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Widget', FT: 'Tx', T: PDFString.of('secret'), V: PDFString.of('secret-field-value'), Rect: [100, 700, 200, 720],
+      }));
+      const keep = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Widget', FT: 'Tx', T: PDFString.of('keep'), V: PDFString.of('kept-field-value'), Rect: [100, 300, 200, 320],
+      }));
+      page.node.set(PDFName.of('Annots'), doc.context.obj([widget, keep]));
+      doc.catalog.set(PDFName.of('AcroForm'), doc.context.obj({ Fields: [widget, keep], CO: [widget, keep] }));
+    });
+    const after = await redact(before, [{ x: 90, y: 690, width: 120, height: 40 }]);
+    expect(await findEverywhere(after, 'secret-field-value')).toEqual([]);
+    expect((await findEverywhere(after, 'kept-field-value')).length).toBeGreaterThan(0);
+  });
+
+  it('画像や Form に付いた XMP のメタデータ（/Metadata）を残さない', async () => {
+    const doc = await PDFDocument.create();
+    const meta = doc.context.register(doc.context.stream('<x:xmpmeta>secret-xmp-author</x:xmpmeta>', { Type: 'Metadata', Subtype: 'XML' }));
+    const img = doc.context.register(doc.context.flateStream(pattern(4, 4), {
+      Type: 'XObject', Subtype: 'Image', Width: 4, Height: 4, ColorSpace: 'DeviceGray', BitsPerComponent: 8, Metadata: meta,
+    }));
+    const page = doc.addPage([595, 842]);
+    page.node.setXObject(PDFName.of('Im0'), img);
+    page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream('q 40 0 0 40 400 100 cm /Im0 Do Q 0 0 1 1 re f')));
+    const before = await doc.save();
+    const after = await redact(before, [{ x: 10, y: 700, width: 20, height: 20 }]);
+    expect(await findEverywhere(after, 'secret-xmp-author')).toEqual([]);
+  });
+});
+
 describe('消した注釈を指す返信', () => {
   it('範囲の外に残る返信（/IRT）とその返信が、消した注釈を指したまま残らない', async () => {
     const before = await rawPage('0 0 1 1 re f', (doc, page) => {

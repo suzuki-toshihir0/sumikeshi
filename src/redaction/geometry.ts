@@ -35,11 +35,12 @@ export function invert(m: Matrix): Matrix | null {
   ];
 }
 
-/** 変換で長さが最大で何倍になるか（線幅の見積もりに使う） */
+/** 変換で長さが最大で何倍になるか（線幅の見積もりに使う）。線形の部分の最大の特異値（シアーでも小さく見積もらない） */
 export function maxScale(m: Matrix): number {
-  const sx = Math.hypot(m[0], m[1]);
-  const sy = Math.hypot(m[2], m[3]);
-  return Math.max(sx, sy);
+  const [a, b, c, d] = m;
+  const s = a * a + b * b + c * c + d * d;
+  const det = a * d - b * c;
+  return Math.sqrt((s + Math.sqrt(Math.max(0, s * s - 4 * det * det))) / 2);
 }
 
 /** 点の集まりの外接矩形 */

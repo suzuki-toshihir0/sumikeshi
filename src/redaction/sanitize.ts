@@ -75,6 +75,12 @@ export function sanitizeDocument(doc: PDFDocument): void {
     }
   }
 
+  // 画像・Form・フォントなどに付いた XMP のメタデータ（名前など、墨消しした情報を含みうる）
+  for (const [, obj] of ctx.enumerateIndirectObjects()) {
+    const dict = obj instanceof PDFStream ? obj.dict : obj instanceof PDFDict ? obj : undefined;
+    if (dict && dict.has(PDFName.of('Metadata'))) dict.delete(PDFName.of('Metadata'));
+  }
+
   // 文書の情報と ID（元のファイルとの結び付きが分かる）
   const trailer = ctx.trailerInfo as { Info?: PDFObject; ID?: PDFObject; Encrypt?: PDFObject };
   delete trailer.Info;

@@ -167,6 +167,12 @@ class Lexer {
         depth--;
         if (depth === 0) break;
       }
+      if (c === 0x0d) {
+        // 逃がしていない行末（CR、CRLF、LF）は、どれも LF の 1 バイト（ISO 32000-1 7.3.4.2）
+        if (b[this.pos] === 0x0a) this.pos++;
+        out.push(0x0a);
+        continue;
+      }
       out.push(c);
     }
     return { type: 'string', bytes: Uint8Array.from(out), hex: false };

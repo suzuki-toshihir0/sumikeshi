@@ -286,6 +286,8 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { ma
       ns.dict.set(k, v);
     }
     ctx.assign(ref, ns);
+    // 差し替えた新しいストリームも書き換え済みにする（次の Do はこちらを引く。書き換えを 2 回すると字が化ける）
+    done.add(ns);
   };
 
   const type3Done = new Set<PDFDict>();
