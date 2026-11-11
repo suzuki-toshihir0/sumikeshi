@@ -274,4 +274,33 @@ test.describe('ブラウザでの墨消し', () => {
     expect(text).not.toContain('花子');
     expect(text).toContain('架空県');
   });
+
+  test('墨消しの結果を表示できなくても、結果はダウンロードでき、範囲もまた選べる', async ({ page }) => {
+    // Worker が表示できない PDF を返したことにする
+    await page.addInitScript(() => {
+      const W = window.Worker;
+      window.Worker = class extends W {
+        set onmessage(fn: ((e: MessageEvent) => void) | null) {
+          super.onmessage = fn ? () => fn({ data: { ok: true, bytes: new Uint8Array([1, 2, 3]) } } as MessageEvent) : null;
+        }
+      } as typeof Worker;
+    });
+    const dialogs: string[] = [];
+    page.on('dialog', async (d) => {
+      dialogs.push(d.message());
+      await d.dismiss();
+    });
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(fixture('cmap.pdf'));
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    await dragPdfRect(page, 595, 842, { x: 111, y: 693, width: 78, height: 25 });
+    await page.locator('#btn-redact').click();
+    await expect(page.locator('#btn-download')).toBeVisible();
+    await expect.poll(() => dialogs.join('\n')).toContain('表示に失敗');
+    expect(dialogs.join('\n')).not.toContain('行っていません');
+    // 範囲をまた選べる
+    await dragPdfRect(page, 595, 842, { x: 50, y: 600, width: 100, height: 25 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+  });
 });

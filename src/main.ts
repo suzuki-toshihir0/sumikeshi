@@ -196,7 +196,6 @@ class App {
     this.selection.disable();
     this.toolbar.setBusy(true);
     const revision = this.docRevision;
-    let succeeded = false;
     try {
       // 墨消しは Web Worker で動かす（壊れた画像などで終わらなくなっても画面が固まらないように）。
       // Worker に渡すと元の ArrayBuffer は使えなくなるので、写しを渡す
@@ -207,20 +206,24 @@ class App {
       );
       // 処理中に文書が替わっていたら、古い文書の結果は使わない
       if (revision !== this.docRevision) return;
-      this.redactedBytes = result;
-      succeeded = true;
-
-      // 墨消し結果でプレビューを更新する
       // 墨消し済みバイトを新しいoriginalBytesとして保持し、追加の墨消しに備える
-      this.originalBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
+      this.redactedBytes = result;
+      this.originalBytes = result.buffer.slice(0) as ArrayBuffer;
       this.store.clear();
-      const viewerBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
+      this.toolbar.showDownload();
+
+      // 墨消し結果でプレビューを更新する。表示に失敗しても、墨消しは済んでいるので結果は落とせるようにする
+      const viewerBytes = result.buffer.slice(0) as ArrayBuffer;
       const currentPage = this.viewer.currentPageNumber;
-      await this.viewer.load(viewerBytes, currentPage);
+      try {
+        await this.viewer.load(viewerBytes, currentPage);
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        console.error('墨消し結果の表示エラー:', e.message, e.stack);
+        alert(`墨消しは済みましたが、結果の表示に失敗しました。ダウンロードして確かめてください。\n${e.message}`);
+      }
       // 描き直す前の文字に掛かっていたブラウザの選択を残さない
       document.getSelection()?.removeAllRanges();
-      this.selection.enable();
-      this.toolbar.showDownload();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       console.error('墨消し処理エラー:', e.message, e.stack);
@@ -233,7 +236,8 @@ class App {
     } finally {
       this.busy = false;
       this.toolbar.setBusy(false);
-      if (!succeeded && revision === this.docRevision) this.selection.enable();
+      // 文書が替わっていなければ、成功しても失敗しても、また範囲を選べるようにする
+      if (revision === this.docRevision) this.selection.enable();
     }
   }
 
