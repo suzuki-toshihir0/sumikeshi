@@ -20,6 +20,8 @@ export async function collectFontUsage(
   targets: Set<PDFDict> | 'all',
   fontCache: Map<PDFDict, Promise<FontModel>>,
   cmapLoader?: CMapLoader,
+  /** 同じ Form が、描く場所によって別のフォントで字を描くとき、そのフォントを入れる（符号を詰め直すと、どちらかで化けるため） */
+  contextDependent?: Set<PDFDict>,
 ): Promise<Map<PDFDict, Set<number>>> {
   const ctx = doc.context;
   const used = new Map<PDFDict, Set<number>>();
@@ -31,6 +33,15 @@ export async function collectFontUsage(
   const visited = new Set<string>();
   const type3Walked = new Set<PDFDict>();
   let visitCount = 0;
+  const ids = new Map<object, number>();
+  const idOf = (o: object | null | undefined) => {
+    if (!o) return 0;
+    let n = ids.get(o);
+    if (n === undefined) ids.set(o, (n = ids.size + 1));
+    return n;
+  };
+  /** Form ごとの、字を描く命令ごとのフォント（最初に読んだ場所のもの） */
+  const formFonts = new Map<PDFStream, (PDFDict | null)[]>();
 
   const model = (f: PDFDict): Promise<FontModel | null> => {
     let p = fontCache.get(f);
@@ -46,7 +57,10 @@ export async function collectFontUsage(
     return cat ? resolve(ctx, cat.get(PDFName.of(name))) : undefined;
   };
 
-  const walk = async (stream: PDFStream | Uint8Array, resources: PDFDict | undefined, depth: number): Promise<void> => {
+  const walk = async (
+    stream: PDFStream | Uint8Array, resources: PDFDict | undefined, depth: number,
+    inheritedFont: PDFDict | null = null, shown?: (PDFDict | null)[],
+  ): Promise<void> => {
     if (depth > 32) return;
     let ops;
     try {
@@ -54,9 +68,10 @@ export async function collectFontUsage(
     } catch {
       return; // 読めない中身はビューアーも描けない
     }
-    let font: PDFDict | null = null;
+    let font: PDFDict | null = inheritedFont;
     const fontStack: (PDFDict | null)[] = [];
     const addCodes = async (strings: Operand[]) => {
+      shown?.push(font);
       if (!font || !used.has(font)) return;
       const m = await model(font);
       const set = used.get(font)!;
@@ -116,7 +131,7 @@ export async function collectFontUsage(
         case 'TJ': if (a[0]?.type === 'array') await addCodes(a[0].items); break;
         case 'Do': {
           const x = a[0]?.type === 'name' ? lookup(resources, 'XObject', a[0].value) : undefined;
-          if (x instanceof PDFStream && getName(ctx, x.dict, 'Subtype') === 'Form') await walkForm(x, resources, depth);
+          if (x instanceof PDFStream && getName(ctx, x.dict, 'Subtype') === 'Form') await walkForm(x, resources, depth, font);
           break;
         }
         case 'scn': case 'SCN': {
@@ -129,14 +144,22 @@ export async function collectFontUsage(
     }
   };
 
-  const walkForm = async (form: PDFStream, parentResources: PDFDict | undefined, depth: number) => {
+  const walkForm = async (form: PDFStream, parentResources: PDFDict | undefined, depth: number, inheritedFont: PDFDict | null = null) => {
     const own = getDict(ctx, form.dict, 'Resources');
     const res = own ?? parentResources;
-    const key = `${ctx.getObjectRef(form)?.toString() ?? 'direct'}|${res ? ctx.getObjectRef(res)?.toString() ?? 'r' : '-'}`;
-    if (visited.has(key) && key.indexOf('direct') < 0) return;
+    // 同じ Form でも、資源（直接書かれた辞書も含めてオブジェクトで区別）と受け継ぐフォントが違えば読み直す
+    const key = `${idOf(form)}|${idOf(res)}|${idOf(inheritedFont)}`;
+    if (visited.has(key)) return;
     visited.add(key);
     if (++visitCount > 100000) return;
-    await walk(form, res, depth + 1);
+    const shown: (PDFDict | null)[] = [];
+    await walk(form, res, depth + 1, inheritedFont, shown);
+    const first = formFonts.get(form);
+    if (!first) {
+      formFonts.set(form, shown);
+    } else if (first.length !== shown.length || first.some((f, i) => f !== shown[i])) {
+      for (const f of [...first, ...shown]) if (f) contextDependent?.add(f);
+    }
   };
 
   for (const page of doc.getPages()) {
@@ -178,7 +201,7 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { ma
   };
 
   /** 中身を書き換え、変わったら新しいバイト列を返す */
-  const rewrite = async (bytes: Uint8Array, resources: PDFDict | undefined, depth: number): Promise<Uint8Array | null> => {
+  const rewrite = async (bytes: Uint8Array, resources: PDFDict | undefined, depth: number, inheritedFont: PDFDict | null = null): Promise<Uint8Array | null> => {
     if (depth > 32) return null;
     let ops;
     try {
@@ -186,7 +209,7 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { ma
     } catch {
       return null;
     }
-    let font: PDFDict | null = null;
+    let font: PDFDict | null = inheritedFont;
     const fontStack: (PDFDict | null)[] = [];
     let changed = false;
     const recodeString = (o: Operand): Operand => {
@@ -238,7 +261,7 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { ma
         case 'TJ': if (a[0]?.type === 'array') a[0] = { type: 'array', items: a[0].items.map(recodeString) }; break;
         case 'Do': {
           const x = a[0]?.type === 'name' ? lookup(resources, 'XObject', a[0].value) : undefined;
-          if (x instanceof PDFStream && getName(ctx, x.dict, 'Subtype') === 'Form') await rewriteStream(x, resources, depth);
+          if (x instanceof PDFStream && getName(ctx, x.dict, 'Subtype') === 'Form') await rewriteStream(x, resources, depth, font);
           break;
         }
       }
@@ -247,11 +270,13 @@ export async function rewriteFontCodes(doc: PDFDocument, maps: Map<PDFDict, { ma
   };
 
   /** 間接オブジェクトのストリームを、書き換えた中身の新しいストリームに差し替える */
-  const rewriteStream = async (stream: PDFStream, parentResources: PDFDict | undefined, depth: number) => {
+  // 同じ Form を描く場所ごとにフォントが違うものは、そのフォントの符号を詰め直さない（collectFontUsage の contextDependent）ので、
+  // 最初に読んだ場所の資源とフォントで書き換えればよい
+  const rewriteStream = async (stream: PDFStream, parentResources: PDFDict | undefined, depth: number, inheritedFont: PDFDict | null = null) => {
     if (done.has(stream)) return;
     done.add(stream);
     const res = getDict(ctx, stream.dict, 'Resources') ?? parentResources;
-    const out = await rewrite(streamBytes(ctx, stream), res, depth + 1);
+    const out = await rewrite(streamBytes(ctx, stream), res, depth + 1, inheritedFont);
     if (!out) return;
     const ref = ctx.getObjectRef(stream);
     if (!ref) return;

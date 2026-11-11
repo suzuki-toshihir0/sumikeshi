@@ -1183,6 +1183,42 @@ describe('ほかの所から指されたままの元のデータ', () => {
   });
 });
 
+describe('Form の中の字のフォントの数え方', () => {
+  it('自分で Tf を持たず、呼び出し元のフォントで字を描く Form の字も、使われ方として数え、符号も書き換える', async () => {
+    const before = await rawPage('BT /T3 12 Tf 50 700 Td (a) Tj ET /Fm0 Do BT /T3 12 Tf 50 500 Td (c) Tj ET', (doc, page) => {
+      page.node.setFontDictionary(PDFName.of('T3'), type3Font(doc, ['ga', 'gb', 'gc'], [11111, 22222, 33333]));
+      const fm = doc.context.register(doc.context.stream('BT 1 0 0 1 50 600 Tm (b) Tj ET', {
+        Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 595, 842], Resources: {},
+      }));
+      page.node.setXObject(PDFName.of('Fm0'), fm);
+    });
+    // 3 行目（c）を消す
+    const after = await redact(before, [{ x: 45, y: 495, width: 30, height: 15 }]);
+    expect((await allText(after)).replace(/\s/g, '')).toBe('ab');
+    expect((await findEverywhere(after, '22222')).length).toBeGreaterThan(0);
+  });
+
+  it('資源を持たない同じ Form を、フォントの名前が別のフォントを指す 2 つの頁で使っても、どちらの頁の字も描ける', async () => {
+    const doc = await PDFDocument.create();
+    const fm = doc.context.register(doc.context.stream('BT /F1 12 Tf 50 600 Td (b) Tj ET', {
+      Type: 'XObject', Subtype: 'Form', BBox: [0, 0, 595, 842],
+    }));
+    const contents = ['BT /F1 12 Tf 50 700 Td (a) Tj ET /Fm0 Do BT /F1 12 Tf 50 500 Td (c) Tj ET', '/Fm0 Do'];
+    const fonts = [type3Font(doc, ['ga', 'gb', 'gc'], [11111, 22222, 33333]), type3Font(doc, ['ga', 'gb', 'gc'], [44444, 55555, 66666])];
+    for (let i = 0; i < 2; i++) {
+      const page = doc.addPage([595, 842]);
+      page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(contents[i])));
+      page.node.setFontDictionary(PDFName.of('F1'), fonts[i]);
+      page.node.setXObject(PDFName.of('Fm0'), fm);
+    }
+    const before = await doc.save();
+    const after = await redact(before, [{ x: 45, y: 495, width: 30, height: 15 }], 1);
+    expect((await allText(after, 1)).replace(/\s/g, '')).toBe('ab');
+    expect((await allText(after, 2)).replace(/\s/g, '')).toBe('b');
+    expect((await findEverywhere(after, '55555')).length).toBeGreaterThan(0);
+  });
+});
+
 describe('消した注釈を指す返信', () => {
   it('範囲の外に残る返信（/IRT）とその返信が、消した注釈を指したまま残らない', async () => {
     const before = await rawPage('0 0 1 1 re f', (doc, page) => {

@@ -656,7 +656,8 @@ export async function scrubFonts(
   const stats: FontScrubStats = { fontsScrubbed: 0, glyphsScrubbed: 0, fontsUnembedded: 0 };
   if (removedCodes.size === 0) return stats;
   const ctx = doc.context;
-  const usage = await collectFontUsage(doc, 'all', fontCache, cmapLoader);
+  const contextDependent = new Set<PDFDict>();
+  const usage = await collectFontUsage(doc, 'all', fontCache, cmapLoader, contextDependent);
   const keepAsIs = formFonts(doc);
   const fonts = [...new Set([...usage.keys(), ...removedCodes.keys()])];
 
@@ -703,7 +704,8 @@ export async function scrubFonts(
   const widthsDone = new Set<PDFDict>();
   for (const i of infos) {
     const { font, used, drop, removed } = i;
-    const normalize = !keepAsIs.has(font);
+    // 同じ Form が描く場所によって別のフォントで字を描くなら、符号を詰め直すと、どちらかの場所で字が化ける
+    const normalize = !keepAsIs.has(font) && !contextDependent.has(font);
     if (drop.size > 0) stats.fontsScrubbed++;
     if (i.subtype === 'Type3') {
       const names = simpleNames(ctx, font);
@@ -712,12 +714,27 @@ export async function scrubFonts(
       // ToUnicode の無いフォントは、字を消していなければ書き換えない（取り出せる文字を変えないため）
       const hasTu = get(ctx, font, 'ToUnicode') instanceof PDFStream;
       if (drop.size === 0 && (!normalize || !hasTu)) continue;
+      if (contextDependent.has(font)) {
+        // 符号は変えずに、消した字の字形・幅・名前だけを消す
+        const procs = get(ctx, font, 'CharProcs');
+        if (procs instanceof PDFDict) {
+          const keptNames = new Set([...used].map((c) => names[c]));
+          const np = ctx.obj({}) as PDFDict;
+          for (const [k, v] of procs.entries()) {
+            const nm = k.decodeText();
+            if (keptNames.has(nm) || ![...drop].some((c) => names[c] === nm)) np.set(k, v);
+          }
+          font.set(PDFName.of('CharProcs'), np);
+        }
+        simpleMetadata(ctx, font, drop, used, removed, false);
+        continue;
+      }
       recodeMaps.set(font, { map: recodeType3(ctx, font, used, normalize), bytes: 1 });
       continue;
     }
     if (i.subtype === 'Type0') {
       if (!i.model?.cidOf || !i.cidFont) continue;
-      if (normalize && canNormalizeComposite(ctx, font, i.cidFont, isShared(i))) {
+      if (normalize && canNormalizeComposite(ctx, font, i.cidFont, isShared(i) || contextDependent.has(font))) {
         const remap = await normalizeComposite(ctx, font, i.model, drop, used, stats);
         if (remap) recodeMaps.set(font, { map: remap, bytes: 2 });
         continue;
