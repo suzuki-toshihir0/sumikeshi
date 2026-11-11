@@ -19,7 +19,7 @@ import { extendTextRects } from './extend-boxes';
 import { pruneReplacedOriginals } from './prune-originals';
 import { IDENTITY } from './geometry';
 import { ResourceEditor } from './resources';
-import { removeOverlappingAnnotations, pruneFormFields } from './annotations';
+import { removeOverlappingAnnotations, removeRepliesToRemoved, pruneFormFields } from './annotations';
 import { sanitizeDocument } from './sanitize';
 import { scrubFonts } from './fonts/scrub';
 import { numbersOf, resolve, streamBytes } from './pdf-objects';
@@ -295,6 +295,12 @@ export async function redactPdf(
     }
   }
 
+  // 消した注釈への返信（/IRT）とポップアップを、文書全体で消す（残すと、消した注釈がたどれて保存される）
+  if (removedWidgets.size > 0) {
+    const before = removedWidgets.size;
+    removeRepliesToRemoved(ctx, pages.map((p) => p.node), removedWidgets);
+    stats.annotationsRemoved = (stats.annotationsRemoved ?? 0) + (removedWidgets.size - before);
+  }
   // 差し替えた元の画像・Form を、ほかの頁や親（Pages）の資源から指されたまま残さない
   pruneReplacedOriginals(doc, replacedOriginals);
   if (removedWidgets.size > 0) pruneFormFields(ctx, doc.catalog, removedWidgets);

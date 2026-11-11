@@ -1183,6 +1183,29 @@ describe('ほかの所から指されたままの元のデータ', () => {
   });
 });
 
+describe('消した注釈を指す返信', () => {
+  it('範囲の外に残る返信（/IRT）とその返信が、消した注釈を指したまま残らない', async () => {
+    const before = await rawPage('0 0 1 1 re f', (doc, page) => {
+      const note = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Text', Rect: [100, 700, 120, 720], Contents: PDFString.of('secret-note-body'),
+      }));
+      const reply = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Text', Rect: [400, 300, 420, 320], Contents: PDFString.of('reply-one-body'), IRT: note,
+      }));
+      const reply2 = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Text', Rect: [400, 200, 420, 220], Contents: PDFString.of('reply-two-body'), IRT: reply,
+      }));
+      const other = doc.context.register(doc.context.obj({
+        Type: 'Annot', Subtype: 'Text', Rect: [400, 100, 420, 120], Contents: PDFString.of('unrelated-note'),
+      }));
+      page.node.set(PDFName.of('Annots'), doc.context.obj([note, reply, reply2, other]));
+    });
+    const after = await redact(before, [{ x: 90, y: 690, width: 40, height: 40 }]);
+    for (const t of ['secret-note-body', 'reply-one-body', 'reply-two-body']) expect(await findEverywhere(after, t)).toEqual([]);
+    expect((await findEverywhere(after, 'unrelated-note')).length).toBeGreaterThan(0);
+  });
+});
+
 describe('動く中身（JavaScript など）', () => {
   it('範囲の外の注釈とフォームの欄の動作（/A の /Next の先、/AA）にある JavaScript も残さない。URI の移動は残す', async () => {
     const before = await rawPage('BT /F1 12 Tf 50 700 Td (secret) Tj ET', async (doc, page) => {

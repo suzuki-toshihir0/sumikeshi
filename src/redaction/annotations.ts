@@ -50,6 +50,44 @@ export function removeOverlappingAnnotations(ctx: PDFContext, page: PDFDict, rec
   return removed;
 }
 
+/**
+ * 文書全体で、消した注釈を /IRT（返信の宛先）で指す注釈を消す（返信の返信もたどる）。
+ * 残すと、消した注釈がその参照からたどれて、本文（Contents）や外観ごと保存される。
+ * 消した注釈を足した removed を返す。
+ */
+export function removeRepliesToRemoved(ctx: PDFContext, pages: PDFDict[], removed: Set<PDFDict>): Set<PDFDict> {
+  let changed = removed.size > 0;
+  while (changed) {
+    changed = false;
+    for (const page of pages) {
+      const annots = getArray(ctx, page, 'Annots');
+      if (!annots) continue;
+      const kept: PDFObject[] = [];
+      let drop = false;
+      for (let i = 0; i < annots.size(); i++) {
+        const raw = annots.get(i);
+        const d = resolve(ctx, raw);
+        if (d instanceof PDFDict && !removed.has(d)) {
+          const irt = getDict(ctx, d, 'IRT');
+          const parent = getDict(ctx, d, 'Parent');
+          const orphanReply = irt !== undefined && removed.has(irt);
+          const orphanPopup = getName(ctx, d, 'Subtype') === 'Popup' && parent !== undefined && removed.has(parent);
+          if (orphanReply || orphanPopup) {
+            removed.add(d);
+            const popup = getDict(ctx, d, 'Popup');
+            if (popup) removed.add(popup);
+            changed = true;
+          }
+        }
+        if (d instanceof PDFDict && removed.has(d)) drop = true;
+        else kept.push(raw);
+      }
+      if (drop) page.set(PDFName.of('Annots'), ctx.obj(kept));
+    }
+  }
+  return removed;
+}
+
 /** フォームの欄の木から、消したウィジェットを外す。ウィジェットが無くなった欄も外す */
 export function pruneFormFields(ctx: PDFContext, catalog: PDFDict, removedWidgets: Set<PDFDict>): void {
   const acro = getDict(ctx, catalog, 'AcroForm');
