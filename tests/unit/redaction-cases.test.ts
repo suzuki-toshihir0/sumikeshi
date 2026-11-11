@@ -1173,6 +1173,30 @@ describe('ほかの所から指されたままの元のデータ', () => {
     await expectNoStreamContains(after, px);
   });
 
+  it('もう一方の頁が資源を持たない Type3 の字形の中で同じ画像を描くなら、その画像は外さない', async () => {
+    const doc = await PDFDocument.create();
+    const px = pattern(40, 20);
+    const img = doc.context.register(doc.context.flateStream(px, {
+      Type: 'XObject', Subtype: 'Image', Width: 40, Height: 20, ColorSpace: 'DeviceGray', BitsPerComponent: 8,
+    }));
+    const glyph = doc.context.register(doc.context.stream('1000 0 0 0 1000 1000 d1 q 1000 0 0 1000 0 0 cm /Im0 Do Q'));
+    const t3 = doc.context.register(doc.context.obj({
+      Type: 'Font', Subtype: 'Type3', FontBBox: [0, 0, 1000, 1000], FontMatrix: [0.001, 0, 0, 0.001, 0, 0],
+      CharProcs: { gi: glyph }, Encoding: { Type: 'Encoding', Differences: [97, PDFName.of('gi')] },
+      FirstChar: 97, LastChar: 97, Widths: [1000],
+    }));
+    const res = doc.context.obj({ XObject: { Im0: img }, Font: { T3: t3 } });
+    const contents = ['q 200 0 0 100 100 600 cm /Im0 Do Q', 'BT /T3 100 Tf 100 300 Td (a) Tj ET'];
+    for (let i = 0; i < 2; i++) {
+      const page = doc.addPage([595, 842]);
+      page.node.set(PDFName.of('Contents'), doc.context.register(doc.context.stream(contents[i])));
+      page.node.set(PDFName.of('Resources'), res);
+    }
+    const before = await doc.save();
+    const after = await redact(before, [{ x: 150, y: 620, width: 60, height: 40 }], 1);
+    expect((await findEverywhere(after, px)).length).toBeGreaterThan(0);
+  });
+
   it('もう一方の頁が同じ画像を描くなら、その頁の画像は元のまま残る', async () => {
     const { bytes } = await imageDoc('inherit', true);
     const after = await redact(bytes, [{ x: 150, y: 620, width: 60, height: 40 }], 1);

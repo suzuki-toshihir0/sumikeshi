@@ -59,6 +59,22 @@ export function pruneReplacedOriginals(doc: PDFDocument, originals: Set<PDFObjec
         const last = a[a.length - 1] as { value: string };
         const pat = resolve(ctx, getDict(ctx, resources, 'Pattern')?.get(PDFName.of(last.value)));
         if (pat instanceof PDFStream) child(pat);
+      } else if (o.op === 'Tf' && a[0]?.type === 'name') {
+        // Type3 の字形の手続きは、資源を持たなければ呼び出し元の資源で画像などを描く
+        const f = resolve(ctx, getDict(ctx, resources, 'Font')?.get(PDFName.of(a[0].value)));
+        const procs = f instanceof PDFDict && getName(ctx, f, 'Subtype') === 'Type3' ? get(ctx, f, 'CharProcs') : undefined;
+        if (procs instanceof PDFDict) {
+          const own = getDict(ctx, f as PDFDict, 'Resources');
+          for (const [, pv] of procs.entries()) {
+            const ps = resolve(ctx, pv);
+            if (!(ps instanceof PDFStream)) continue;
+            const res = own ?? resources;
+            const key = `${idOf(ps)}|${res ? idOf(res) : 0}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            visit(ps, res, depth + 1);
+          }
+        }
       } else if (o.op === 'gs' && a[0]?.type === 'name') {
         const eg = resolve(ctx, getDict(ctx, resources, 'ExtGState')?.get(PDFName.of(a[0].value)));
         const smask = eg instanceof PDFDict ? get(ctx, eg, 'SMask') : undefined;
