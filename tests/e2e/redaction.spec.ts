@@ -275,7 +275,7 @@ test.describe('ブラウザでの墨消し', () => {
     expect(text).toContain('架空県');
   });
 
-  test('墨消しの結果を表示できなくても、結果はダウンロードでき、範囲もまた選べる', async ({ page }) => {
+  test('墨消しの結果を表示できなくても、結果はダウンロードできる。表示と合わない画面では範囲を選ばせない', async ({ page }) => {
     // Worker が表示できない PDF を返したことにする
     await page.addInitScript(() => {
       const W = window.Worker;
@@ -299,7 +299,13 @@ test.describe('ブラウザでの墨消し', () => {
     await expect(page.locator('#btn-download')).toBeVisible();
     await expect.poll(() => dialogs.join('\n')).toContain('表示に失敗');
     expect(dialogs.join('\n')).not.toContain('行っていません');
-    // 範囲をまた選べる
+    // 画面が結果と合わないので、範囲は選べない（選んでも次の墨消しのバイト列と合わない）
+    await dragPdfRect(page, 595, 842, { x: 50, y: 600, width: 100, height: 25 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+    // 別の PDF を開けば、また選べる
+    await page.locator('#file-input').setInputFiles(fixture('cmap.pdf'));
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
     await dragPdfRect(page, 595, 842, { x: 50, y: 600, width: 100, height: 25 });
     await expect(page.locator('.redaction-rect')).toHaveCount(1);
   });

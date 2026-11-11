@@ -196,6 +196,8 @@ class App {
     this.selection.disable();
     this.toolbar.setBusy(true);
     const revision = this.docRevision;
+    /** 画面が墨消しの結果と合っている（表示に失敗したら、範囲を選ばせない） */
+    let previewMatches = true;
     try {
       // 墨消しは Web Worker で動かす（壊れた画像などで終わらなくなっても画面が固まらないように）。
       // Worker に渡すと元の ArrayBuffer は使えなくなるので、写しを渡す
@@ -210,6 +212,8 @@ class App {
       this.redactedBytes = result;
       this.originalBytes = result.buffer.slice(0) as ArrayBuffer;
       this.store.clear();
+      // 墨消しした範囲の枠も消す（結果の表示に失敗すると描き直されず、枠だけが残る）
+      this.overlay.clear();
       this.toolbar.showDownload();
 
       // 墨消し結果でプレビューを更新する。表示に失敗しても、墨消しは済んでいるので結果は落とせるようにする
@@ -220,7 +224,8 @@ class App {
       } catch (err) {
         const e = err instanceof Error ? err : new Error(String(err));
         console.error('墨消し結果の表示エラー:', e.message, e.stack);
-        alert(`墨消しは済みましたが、結果の表示に失敗しました。ダウンロードして確かめてください。\n${e.message}`);
+        previewMatches = false;
+        alert(`墨消しは済みましたが、結果の表示に失敗しました。ダウンロードして確かめてください。続けて墨消しするときは、PDF を開き直してください。\n${e.message}`);
       }
       // 描き直す前の文字に掛かっていたブラウザの選択を残さない
       document.getSelection()?.removeAllRanges();
@@ -236,8 +241,9 @@ class App {
     } finally {
       this.busy = false;
       this.toolbar.setBusy(false);
-      // 文書が替わっていなければ、成功しても失敗しても、また範囲を選べるようにする
-      if (revision === this.docRevision) this.selection.enable();
+      // 文書が替わっておらず、画面が手元のバイト列と合っていれば、また範囲を選べるようにする。
+      // 結果の表示に失敗したときは、画面が古い文書のままで、選んだ範囲が次に送るバイト列と合わないので選ばせない
+      if (revision === this.docRevision && previewMatches) this.selection.enable();
     }
   }
 
