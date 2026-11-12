@@ -4,7 +4,8 @@ import { PageNavigator } from './ui/page-navigator';
 import { Overlay } from './ui/overlay';
 import { SelectionManager } from './selection/selection-manager';
 import { RedactionStore } from './redaction/redaction-store';
-import { redactPdf } from './redaction/pdf-redactor';
+import { RedactionError } from './redaction/errors';
+import { runRedactionInWorker } from './redaction/redaction-runner';
 import { readFileAsArrayBuffer, downloadPdf } from './utils/file-io';
 
 class App {
@@ -17,6 +18,10 @@ class App {
 
   private originalBytes: ArrayBuffer | null = null;
   private redactedBytes: Uint8Array | null = null;
+  /** 墨消しの処理中（範囲の追加・削除と、別の PDF を開くことを止める） */
+  private busy = false;
+  /** 開いた文書の番号。処理中に文書が替わったら、古い処理の結果を捨てる */
+  private docRevision = 0;
   private dropZone: HTMLElement;
   private pageWrapper: HTMLElement;
 
@@ -69,6 +74,7 @@ class App {
 
     // 選択クリア
     this.toolbar.onClear = () => {
+      if (this.busy) return;
       this.store.clear();
       this.refreshOverlay();
     };
@@ -81,6 +87,7 @@ class App {
 
     // オーバーレイの墨消し矩形クリック(削除)
     this.overlay.onRectClick = (pageNum, index) => {
+      if (this.busy) return;
       this.store.remove(pageNum, index);
       this.refreshOverlay();
     };
@@ -145,11 +152,20 @@ class App {
   }
 
   private async loadFile(file: File): Promise<void> {
+    if (this.busy) {
+      alert('墨消しの処理中は、ほかの PDF を開けません。処理が終わってから開いてください。');
+      return;
+    }
+    this.docRevision++;
     const fileBytes = await readFileAsArrayBuffer(file);
     // pdf-libで後から使うためにコピーを保持する
     // (pdfjs-distがWorkerにtransferするとdetachedになるため)
     this.originalBytes = fileBytes.slice(0);
     this.store.clear();
+    // 前の文書の墨消しの結果を落とせないようにする
+    this.redactedBytes = null;
+    this.toolbar.hideDownload();
+    document.getSelection()?.removeAllRanges();
 
     // UI切り替え
     this.dropZone.hidden = true;
@@ -175,25 +191,60 @@ class App {
       return;
     }
 
+    // 処理中は範囲を足したり消したりさせない（処理に渡した範囲と、終わったときに消す範囲がずれないように）
+    this.busy = true;
+    this.selection.disable();
+    this.toolbar.setBusy(true);
+    const revision = this.docRevision;
+    /** 画面が墨消しの結果と合っている（表示に失敗したら、範囲を選ばせない） */
+    let previewMatches = true;
     try {
-      this.redactedBytes = await redactPdf(
-        this.originalBytes,
+      // 墨消しは Web Worker で動かす（壊れた画像などで終わらなくなっても画面が固まらないように）。
+      // Worker に渡すと元の ArrayBuffer は使えなくなるので、写しを渡す
+      const result = await runRedactionInWorker(
+        () => new Worker(new URL('./redaction/redaction-worker.ts', import.meta.url), { type: 'module' }),
+        this.originalBytes.slice(0),
         this.store.getAllRects(),
       );
-
-      // 墨消し結果でプレビューを更新する
+      // 処理中に文書が替わっていたら、古い文書の結果は使わない
+      if (revision !== this.docRevision) return;
       // 墨消し済みバイトを新しいoriginalBytesとして保持し、追加の墨消しに備える
-      this.originalBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
+      this.redactedBytes = result;
+      this.originalBytes = result.buffer.slice(0) as ArrayBuffer;
       this.store.clear();
-      const viewerBytes = this.redactedBytes.buffer.slice(0) as ArrayBuffer;
+      // 墨消しした範囲の枠も消す（結果の表示に失敗すると描き直されず、枠だけが残る）
+      this.overlay.clear();
+
+      // 墨消し結果でプレビューを更新する。表示に失敗しても、墨消しは済んでいるので結果は落とせるようにする
+      const viewerBytes = result.buffer.slice(0) as ArrayBuffer;
       const currentPage = this.viewer.currentPageNumber;
-      await this.viewer.load(viewerBytes, currentPage);
-      this.selection.enable();
+      try {
+        await this.viewer.load(viewerBytes, currentPage);
+      } catch (err) {
+        const e = err instanceof Error ? err : new Error(String(err));
+        console.error('墨消し結果の表示エラー:', e.message, e.stack);
+        previewMatches = false;
+        alert(`墨消しは済みましたが、結果の表示に失敗しました。ダウンロードして確かめてください。続けて墨消しするときは、PDF を開き直してください。\n${e.message}`);
+      }
+      // 描き直す前の文字に掛かっていたブラウザの選択を残さない
+      document.getSelection()?.removeAllRanges();
+      // 表示を試みた後に出す（ボタンが見えたら処理は終わっている。表示に失敗しても結果は落とせる）
       this.toolbar.showDownload();
     } catch (err) {
       const e = err instanceof Error ? err : new Error(String(err));
       console.error('墨消し処理エラー:', e.message, e.stack);
-      alert(`墨消し処理中にエラーが発生しました。\n${e.message}`);
+      if (err instanceof RedactionError) {
+        // 情報が残るおそれのある PDF は作らない。理由をそのまま伝える
+        alert(`この PDF は安全に墨消しできないため、今回選んだ範囲の墨消しは行っていません。\n\n${e.message}`);
+      } else {
+        alert(`墨消し処理中にエラーが発生しました。今回選んだ範囲の墨消しは行っていません。\n${e.message}`);
+      }
+    } finally {
+      this.busy = false;
+      this.toolbar.setBusy(false);
+      // 文書が替わっておらず、画面が手元のバイト列と合っていれば、また範囲を選べるようにする。
+      // 結果の表示に失敗したときは、画面が古い文書のままで、選んだ範囲が次に送るバイト列と合わないので選ばせない
+      if (revision === this.docRevision && previewMatches) this.selection.enable();
     }
   }
 

@@ -1,513 +1,313 @@
-import {
-  PDFDocument,
-  PDFName,
-  PDFArray,
-  PDFRef,
-  PDFRawStream,
-  decodePDFRawStream,
-  rgb,
-} from 'pdf-lib';
+/**
+ * 墨消しの全体の流れ。
+ *
+ * 1. 頁ごとに、ContentStream を 1 命令ずつ追い、範囲にかかる文字・パス・画像の画素を消す
+ *    （Form XObject の中も同じ。content-redactor.ts）
+ * 2. 範囲にかかる注釈（フォームの欄を含む）を消す
+ * 3. 範囲に黒い四角を描く
+ * 4. 文書全体から、情報が残りうるもの（メタデータ、構造の木、しおり、縮小画像、参照されないオブジェクト）を消す
+ *
+ * 安全に消せないもの（幅の分からないフォントで範囲にかかり得る文字、読めない形式の画像など）があれば、
+ * 出力せずに RedactionError を投げる。
+ */
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFObject, PDFStream, EncryptedPDFError } from 'pdf-lib';
 import type { PdfRect } from '../utils/coordinates';
-import { cleanMetadata } from './metadata-cleaner';
+import { parseContentStream, type Operation } from './content/lexer';
+import { serializeOperations } from './content/writer';
+import { redactOperations, type Observed, type RedactionContext, type RedactionStats } from './content-redactor';
+import { extendTextRects } from './extend-boxes';
+import { pruneReplacedOriginals } from './prune-originals';
+import { IDENTITY } from './geometry';
+import { ResourceEditor } from './resources';
+import { removeOverlappingAnnotations, removeRepliesToRemoved, pruneFormFields } from './annotations';
+import { sanitizeDocument } from './sanitize';
+import { scrubFonts } from './fonts/scrub';
+import { numbersOf, resolve, streamBytes } from './pdf-objects';
+import { RedactionError } from './errors';
+import type { CMapLoader } from './fonts/cmap';
+import type { FontModel } from './fonts/font-model';
 
-/** 2つの矩形が重なるかチェック */
-function rectsOverlap(a: PdfRect, b: PdfRect): boolean {
-  return (
-    a.x < b.x + b.width &&
-    a.x + a.width > b.x &&
-    a.y < b.y + b.height &&
-    a.y + a.height > b.y
-  );
+export { RedactionError };
+export type { RedactionStats };
+
+export interface RedactOptions {
+  /** 定義済みの CMap（.bcmap）を読む関数。省略時はブラウザで cmaps/ から読む */
+  cmapLoader?: CMapLoader;
+  /** 処理の結果の数を受け取る */
+  onStats?: (stats: RedactionStats) => void;
 }
 
-/**
- * 小さな矩形群をマージして、重なり合う矩形をまとめる。
- * テキスト選択では文字単位の小さな矩形が大量に生成されるため、
- * これらを行単位の大きな矩形にまとめることで、
- * ContentStream内のテキスト位置との照合精度を向上させる。
- */
-function mergeRects(rects: PdfRect[]): PdfRect[] {
-  if (rects.length === 0) return [];
-
-  // y座標（行）が近い矩形をグループ化してマージする
-  const sorted = [...rects].sort((a, b) => a.y - b.y);
-  const merged: PdfRect[] = [];
-  let current = { ...sorted[0] };
-
-  for (let i = 1; i < sorted.length; i++) {
-    const r = sorted[i];
-    // y座標が近く(同じ行)、x方向で重なりまたは隣接している場合マージ
-    const yOverlap =
-      current.y < r.y + r.height &&
-      current.y + current.height > r.y;
-    const xClose =
-      current.x < r.x + r.width + 5 &&
-      current.x + current.width + 5 > r.x;
-
-    if (yOverlap && xClose) {
-      const minX = Math.min(current.x, r.x);
-      const minY = Math.min(current.y, r.y);
-      const maxX = Math.max(current.x + current.width, r.x + r.width);
-      const maxY = Math.max(current.y + current.height, r.y + r.height);
-      current = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-    } else {
-      merged.push(current);
-      current = { ...r };
-    }
-  }
-  merged.push(current);
-  return merged;
-}
-
-/**
- * ContentStreamバイナリからテキスト描画オペレーターを削除する。
- *
- * BT...ETブロック内のTmオペレーターでテキスト位置を追跡し、
- * 墨消し領域と重なるテキストオペレーターを空に置換する。
- */
-function removeTextOperatorsFromStream(
-  streamBytes: Uint8Array,
-  redactRects: PdfRect[],
-  _pageHeight: number,
-): Uint8Array {
-  const content = new TextDecoder('latin1').decode(streamBytes);
-
-  // BT...ETブロックを探して処理する
-  const result: string[] = [];
-  let lastIndex = 0;
-
-  // BT...ETブロックをネストなしで検出
-  const btEtRegex = /\bBT\b([\s\S]*?)\bET\b/g;
-  let match: RegExpExecArray | null;
-  while ((match = btEtRegex.exec(content)) !== null) {
-    // BT前のコンテンツをそのまま追加
-    result.push(content.slice(lastIndex, match.index));
-
-    // BTブロック内を処理
-    const blockContent = match[1];
-    const { content: processedBlock, allTextRedacted } = processTextBlock(blockContent, redactRects);
-
-    if (allTextRedacted) {
-      // ブロック内の全テキスト描画オペレーターが墨消しされた場合、
-      // BT...ETブロックごと削除する。
-      // テキスト状態はBT...ETにスコープされるため外部への副作用はない。
-    } else {
-      result.push('BT');
-      result.push(processedBlock);
-      result.push('ET');
-    }
-
-    lastIndex = match.index + match[0].length;
-  }
-
-  result.push(content.slice(lastIndex));
-  return new TextEncoder().encode(result.join(''));
-}
-
-/**
- * BT...ETブロック内のテキストオペレーターを処理する。
- *
- * テキスト行列(Tm)とテキスト位置(Td, TD)を追跡し、
- * フォントサイズ(Tf)を考慮して、テキストの位置を推定する。
- * 墨消し領域と重なるテキスト描画オペレーターのみを空に置換する。
- *
- * @returns content: 処理後のブロック内容, allTextRedacted: 全テキスト描画オペレーターが墨消しされたか
- */
-function processTextBlock(
-  blockContent: string,
-  redactRects: PdfRect[],
-): { content: string; allTextRedacted: boolean } {
-  // テキスト状態
-  let fontSize = 12;
-  // テキスト行列: [a, b, c, d, e, f] — 位置は (e, f)
-  let tmE = 0, tmF = 0;
-  let lineX = 0, lineY = 0;
-
-  // テキスト描画オペレーターのカウント
-  let textOpTotal = 0;
-  let textOpRedacted = 0;
-
-  // オペレーターを1つずつ処理するためにトークン化
-  // PDFのContentStreamはスタックベース: オペランド... オペレーター
-  const tokens = tokenize(blockContent);
-  const outputTokens: string[] = [];
-  const operandStack: string[] = [];
-
-  for (const token of tokens) {
-    if (isOperator(token)) {
-      const operands = operandStack.splice(0);
-
-      switch (token) {
-        case 'Tf': {
-          // フォント名 サイズ Tf
-          if (operands.length >= 2) {
-            fontSize = Math.abs(parseFloat(operands[operands.length - 1]));
-          }
-          outputTokens.push([...operands, token].join(' '));
-          break;
-        }
-        case 'Tm': {
-          // a b c d e f Tm
-          if (operands.length >= 6) {
-            tmE = parseFloat(operands[4]);
-            tmF = parseFloat(operands[5]);
-            lineX = tmE;
-            lineY = tmF;
-          }
-          outputTokens.push([...operands, token].join(' '));
-          break;
-        }
-        case 'Td':
-        case 'TD': {
-          // tx ty Td
-          if (operands.length >= 2) {
-            const tx = parseFloat(operands[0]);
-            const ty = parseFloat(operands[1]);
-            lineX += tx;
-            lineY += ty;
-            tmE = lineX;
-            tmF = lineY;
-          }
-          outputTokens.push([...operands, token].join(' '));
-          break;
-        }
-        case 'T*': {
-          // 次の行に移動 (TL分だけ下に移動)
-          outputTokens.push(token);
-          break;
-        }
-        case 'Tj':
-        case 'TJ':
-        case "'":
-        case '"': {
-          // テキスト描画オペレーター
-          // オペランドからテキスト幅を推定
-          const estWidth = estimateTextWidth(operands, fontSize);
-          const textRect: PdfRect = {
-            x: tmE,
-            y: tmF - fontSize * 0.2,
-            width: estWidth,
-            height: fontSize * 1.2,
-          };
-
-          textOpTotal++;
-          const shouldRedact = redactRects.some((r) => rectsOverlap(textRect, r));
-          if (shouldRedact) {
-            textOpRedacted++;
-            // テキストオペレーターを空文字列に置換
-            outputTokens.push('() Tj');
-          } else {
-            outputTokens.push([...operands, token].join(' '));
-          }
-          break;
-        }
-        default:
-          outputTokens.push([...operands, token].join(' '));
-          break;
-      }
-    } else {
-      operandStack.push(token);
-    }
-  }
-
-  // 残ったオペランドをそのまま出力
-  if (operandStack.length > 0) {
-    outputTokens.push(operandStack.join(' '));
-  }
-
-  // 全テキスト描画オペレーターが墨消しされたかどうか
-  const allTextRedacted = textOpTotal > 0 && textOpRedacted === textOpTotal;
-
-  return {
-    content: '\n' + outputTokens.join('\n') + '\n',
-    allTextRedacted,
+function defaultCMapLoader(): CMapLoader | undefined {
+  // ブラウザ（画面と Web Worker の両方）でだけ使う。Node（試験）には location が無い
+  if (typeof fetch !== 'function' || typeof location === 'undefined') return undefined;
+  const base = `${import.meta.env.BASE_URL}cmaps/`;
+  return async (name: string) => {
+    const res = await fetch(`${base}${name}.bcmap`);
+    if (!res.ok) throw new Error(`CMap ${name} を読めない（${res.status}）`);
+    return new Uint8Array(await res.arrayBuffer());
   };
 }
 
-/**
- * テキストオペランドから描画幅を推定する。
- * hex文字列 <...> の場合はバイト数÷2が文字数。
- * 文字列リテラル (...) の場合は文字数をカウント。
- * TJ配列 [...] の場合は配列内の文字列の合計。
- * 平均文字幅はフォントサイズの約0.6倍と仮定。
- */
-function estimateTextWidth(operands: string[], fontSize: number): number {
-  const avgCharWidth = fontSize * 0.6;
-  let charCount = 0;
-
-  for (const op of operands) {
-    if (op.startsWith('<') && op.endsWith('>') && !op.startsWith('<<')) {
-      // hex文字列: 2桁で1バイト = 1文字
-      charCount += (op.length - 2) / 2;
-    } else if (op.startsWith('(') && op.endsWith(')')) {
-      // 文字列リテラル: エスケープを考慮しつつ文字数を数える
-      let count = 0;
-      for (let i = 1; i < op.length - 1; i++) {
-        if (op[i] === '\\') { i++; }
-        count++;
-      }
-      charCount += count;
-    } else if (op.startsWith('[') && op.endsWith(']')) {
-      // TJ配列: 文字列要素の合計
-      const inner = op.slice(1, -1);
-      const strMatches = inner.match(/<[0-9A-Fa-f]*>|\([^)]*\)/g);
-      if (strMatches) {
-        for (const m of strMatches) {
-          if (m.startsWith('<')) {
-            charCount += (m.length - 2) / 2;
-          } else if (m.startsWith('(')) {
-            charCount += m.length - 2;
-          }
-        }
-      }
-    }
-  }
-
-  return Math.max(charCount * avgCharWidth, fontSize);
-}
-
-/** PDFのContentStreamトークンかオペレーターかを判定 */
-function isOperator(token: string): boolean {
-  // PDFオペレーターは英字のみで構成される（ただし ' と " もオペレーター）
-  if (token === "'" || token === '"') return true;
-  if (token === 'T*') return true;
-  return /^[A-Za-z*]+$/.test(token) && !/^[0-9]/.test(token);
+/** 幅や高さが負の矩形を直し、面積の無いものを除く */
+function normalizeRects(rects: PdfRect[]): PdfRect[] {
+  return rects
+    .map((r) => ({
+      x: Math.min(r.x, r.x + r.width),
+      y: Math.min(r.y, r.y + r.height),
+      width: Math.abs(r.width),
+      height: Math.abs(r.height),
+      ...(r.source === 'text' ? { source: 'text' as const } : {}),
+    }))
+    .filter((r) => r.width > 0 && r.height > 0 && [r.x, r.y, r.width, r.height].every(Number.isFinite));
 }
 
 /**
- * ContentStreamをトークンに分割する。
- * 文字列リテラル(...)やhex文字列<...>、配列[...]を1つのトークンとして扱う。
+ * 同じ行（縦書きなら同じ列）で隣り合う範囲を 1 つにまとめる。
+ * 文字選択では 1 文字ずつの矩形が並ぶので、そのまま黒い四角にすると、字数や姓と名の区切りが見えてしまう。
+ * 消す範囲もまとめた形で扱う（隙間の空白も消える）。
+ *
+ * まとめると外接する矩形になるので、並ぶ向きと直交する辺（横に並ぶなら上下、縦に並ぶなら左右）が
+ * 揃っているものだけをまとめる。揃っていないもの（表の別の行の長さの違う値など）までまとめると、
+ * どちらの範囲にも入っていない角（短い行の横のラベルや隣の欄）まで消してしまう。
  */
-function tokenize(content: string): string[] {
-  const tokens: string[] = [];
-  let i = 0;
-  const len = content.length;
-
-  while (i < len) {
-    // 空白スキップ
-    if (/\s/.test(content[i])) {
-      i++;
-      continue;
-    }
-
-    // コメント
-    if (content[i] === '%') {
-      while (i < len && content[i] !== '\n' && content[i] !== '\r') i++;
-      continue;
-    }
-
-    // 文字列リテラル (...)
-    if (content[i] === '(') {
-      let depth = 1;
-      let str = '(';
-      i++;
-      while (i < len && depth > 0) {
-        if (content[i] === '\\') {
-          str += content[i] + (content[i + 1] ?? '');
-          i += 2;
-          continue;
+export function mergeRects(rects: PdfRect[]): PdfRect[] {
+  let list = rects.map((r) => ({ ...r }));
+  const overlap1d = (a0: number, a1: number, b0: number, b1: number) => Math.min(a1, b1) - Math.max(a0, b0);
+  const near = (a: number, b: number, tol: number) => Math.abs(a - b) <= tol;
+  let merged = true;
+  while (merged) {
+    merged = false;
+    outer: for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i];
+        const b = list[j];
+        const vOverlap = overlap1d(a.y, a.y + a.height, b.y, b.y + b.height);
+        const hOverlap = overlap1d(a.x, a.x + a.width, b.x, b.x + b.width);
+        const minH = Math.min(a.height, b.height);
+        const minW = Math.min(a.width, b.width);
+        const maxW = Math.max(a.width, b.width);
+        // 字の大きさの目安（1 文字なら字の幅か高さ、行や列なら太さ）。辺が揃っているとみなす幅はこの 0.15 倍。
+        // ずれの分だけ外接する矩形が隣の字にかかり、その字まで消すので、小さく取る
+        const tol = 0.15 * Math.max(Math.min(a.width, a.height), Math.min(b.width, b.height));
+        // 含むとみなすはみ出しは、小さいほうの範囲の大きさで測る（大きいほうで測ると、はみ出しが大きくなる）
+        const nestTol = 0.1 * Math.min(a.width, a.height, b.width, b.height);
+        const yAligned = near(a.y, b.y, tol) && near(a.y + a.height, b.y + b.height, tol);
+        const xAligned = near(a.x, b.x, tol) && near(a.x + a.width, b.x + b.width, tol);
+        // 横に並ぶ（同じ行）: 上下の辺が揃い、横の隙間が字の高さの 0.6 倍以下。
+        // 縦書きの列（縦に長い）どうしでは高さが字の大きさにならないので、幅の 2 倍で頭を抑える
+        const sameLine = yAligned && -hOverlap <= Math.min(minH, 2 * maxW) * 0.6;
+        // 縦に並ぶ（同じ列。縦書きの字）: 左右の辺が揃い、縦の隙間が字の大きさ（幅と高さの小さいほう）の 0.6 倍以下
+        const sameColumn = xAligned && -vOverlap <= Math.min(minW, minH) * 0.6;
+        // 一方が他方を含む
+        const contains = (o: PdfRect, n: PdfRect) =>
+          n.x >= o.x - nestTol && n.y >= o.y - nestTol && n.x + n.width <= o.x + o.width + nestTol && n.y + n.height <= o.y + o.height + nestTol;
+        const nested = vOverlap > 0 && hOverlap > 0 && (contains(a, b) || contains(b, a));
+        if (sameLine || sameColumn || nested) {
+          const x0 = Math.min(a.x, b.x);
+          const y0 = Math.min(a.y, b.y);
+          const x1 = Math.max(a.x + a.width, b.x + b.width);
+          const y1 = Math.max(a.y + a.height, b.y + b.height);
+          // 文字選択の範囲どうしをまとめたものだけを、文字選択の範囲として扱う（矩形で選んだ範囲は広げない）
+          const source = a.source === 'text' && b.source === 'text' ? { source: 'text' as const } : {};
+          list[i] = { x: x0, y: y0, width: x1 - x0, height: y1 - y0, ...source };
+          list = list.filter((_, k) => k !== j);
+          merged = true;
+          break outer;
         }
-        if (content[i] === '(') depth++;
-        if (content[i] === ')') depth--;
-        str += content[i];
-        i++;
-      }
-      tokens.push(str);
-      continue;
-    }
-
-    // hex文字列 <...>
-    if (content[i] === '<' && content[i + 1] !== '<') {
-      let str = '<';
-      i++;
-      while (i < len && content[i] !== '>') {
-        str += content[i];
-        i++;
-      }
-      str += '>';
-      i++;
-      tokens.push(str);
-      continue;
-    }
-
-    // 辞書 << ... >>
-    if (content[i] === '<' && content[i + 1] === '<') {
-      let str = '<<';
-      i += 2;
-      let depth = 1;
-      while (i < len && depth > 0) {
-        if (content[i] === '<' && content[i + 1] === '<') {
-          depth++;
-          str += '<<';
-          i += 2;
-          continue;
-        }
-        if (content[i] === '>' && content[i + 1] === '>') {
-          depth--;
-          str += '>>';
-          i += 2;
-          continue;
-        }
-        str += content[i];
-        i++;
-      }
-      tokens.push(str);
-      continue;
-    }
-
-    // 配列 [...]
-    if (content[i] === '[') {
-      let depth = 1;
-      let str = '[';
-      i++;
-      while (i < len && depth > 0) {
-        if (content[i] === '(') {
-          // 配列内の文字列リテラル
-          let subDepth = 1;
-          str += '(';
-          i++;
-          while (i < len && subDepth > 0) {
-            if (content[i] === '\\') {
-              str += content[i] + (content[i + 1] ?? '');
-              i += 2;
-              continue;
-            }
-            if (content[i] === '(') subDepth++;
-            if (content[i] === ')') subDepth--;
-            str += content[i];
-            i++;
-          }
-          continue;
-        }
-        if (content[i] === '[') depth++;
-        if (content[i] === ']') depth--;
-        str += content[i];
-        i++;
-      }
-      tokens.push(str);
-      continue;
-    }
-
-    // 名前 /Name
-    if (content[i] === '/') {
-      let str = '/';
-      i++;
-      while (i < len && !/[\s/<>\[\]()%]/.test(content[i])) {
-        str += content[i];
-        i++;
-      }
-      tokens.push(str);
-      continue;
-    }
-
-    // 数値またはオペレーター
-    {
-      let str = '';
-      while (i < len && !/[\s/<>\[\]()%]/.test(content[i])) {
-        str += content[i];
-        i++;
-      }
-      if (str.length > 0) {
-        tokens.push(str);
       }
     }
   }
-
-  return tokens;
+  return list;
 }
 
-/**
- * ContentStreamをデコードしてバイト列として返す。
- * Flate圧縮されたストリームはdecodePDFRawStreamでデコードする。
- */
-function getStreamBytes(streamObj: unknown): Uint8Array | null {
-  if (streamObj instanceof PDFRawStream) {
-    try {
-      const decoded = decodePDFRawStream(streamObj);
-      return decoded.decode();
-    } catch {
-      return streamObj.getContents();
+/** 頁の属性を、親（Pages）から受け継いだものも含めて引く */
+function inheritedAttr(page: PDFDict, key: string, doc: PDFDocument): unknown {
+  let node: PDFDict | undefined = page;
+  for (let i = 0; node && i < 64; i++) {
+    const v = node.get(PDFName.of(key));
+    if (v !== undefined) return resolve(doc.context, v);
+    const parent = resolve(doc.context, node.get(PDFName.of('Parent')));
+    node = parent instanceof PDFDict ? parent : undefined;
+  }
+  return undefined;
+}
+
+/** 頁の見える範囲（CropBox、無ければ MediaBox） */
+function pageBox(doc: PDFDocument, page: PDFDict): [number, number, number, number] {
+  for (const key of ['CropBox', 'MediaBox']) {
+    const v = inheritedAttr(page, key, doc);
+    if (v instanceof PDFArray) {
+      const n = numbersOf(doc.context, v);
+      if (n.length === 4 && n.every(Number.isFinite)) return [Math.min(n[0], n[2]), Math.min(n[1], n[3]), Math.max(n[0], n[2]), Math.max(n[1], n[3])];
     }
   }
-  if (streamObj && typeof (streamObj as Record<string, unknown>).getContents === 'function') {
-    return (streamObj as { getContents(): Uint8Array }).getContents();
+  return [0, 0, 612, 792];
+}
+
+/** 頁の注釈の矩形（黒い四角を広げるとき、注釈の手前で止める） */
+function annotationRects(doc: PDFDocument, page: PDFDict): [number, number, number, number][] {
+  const out: [number, number, number, number][] = [];
+  const annots = resolve(doc.context, page.get(PDFName.of('Annots')));
+  if (!(annots instanceof PDFArray)) return out;
+  for (let i = 0; i < annots.size(); i++) {
+    const a = resolve(doc.context, annots.get(i));
+    if (!(a instanceof PDFDict)) continue;
+    const r = resolve(doc.context, a.get(PDFName.of('Rect')));
+    if (!(r instanceof PDFArray)) continue;
+    const n = numbersOf(doc.context, r);
+    if (n.length === 4 && n.every(Number.isFinite)) out.push([Math.min(n[0], n[2]), Math.min(n[1], n[3]), Math.max(n[0], n[2]), Math.max(n[1], n[3])]);
   }
-  return null;
+  return out;
+}
+
+/** 頁の ContentStream（配列なら連結）を読む */
+function pageContentBytes(doc: PDFDocument, page: PDFDict): Uint8Array {
+  const contents = resolve(doc.context, page.get(PDFName.of('Contents')));
+  const streams: PDFStream[] = [];
+  if (contents instanceof PDFStream) streams.push(contents);
+  else if (contents instanceof PDFArray) {
+    for (let i = 0; i < contents.size(); i++) {
+      const s = resolve(doc.context, contents.get(i));
+      if (s instanceof PDFStream) streams.push(s);
+    }
+  }
+  const parts = streams.map((s) => streamBytes(doc.context, s));
+  const total = parts.reduce((n, p) => n + p.length + 1, 0);
+  const out = new Uint8Array(total);
+  let pos = 0;
+  for (const p of parts) {
+    out.set(p, pos);
+    pos += p.length;
+    out[pos++] = 0x0a; // ストリームの境目で字句が続かないように
+  }
+  return out;
+}
+
+/** q / Q の釣り合いを取りつつ、元の中身を q ... Q で囲む */
+function wrapBalanced(ops: Operation[]): Operation[] {
+  let depth = 0;
+  let minDepth = 0;
+  for (const o of ops) {
+    if (o.op === 'q') depth++;
+    else if (o.op === 'Q') {
+      depth--;
+      minDepth = Math.min(minDepth, depth);
+    }
+  }
+  const pre = 1 - minDepth;
+  const post = depth + pre;
+  return [
+    ...Array.from({ length: pre }, () => ({ op: 'q', operands: [] })),
+    ...ops,
+    ...Array.from({ length: Math.max(post, 0) }, () => ({ op: 'Q', operands: [] })),
+  ];
+}
+
+function blackBoxes(rects: PdfRect[]): Operation[] {
+  const n = (value: number) => ({ type: 'number' as const, value });
+  return [
+    { op: 'q', operands: [] },
+    { op: 'g', operands: [n(0)] },
+    ...rects.map((r) => ({ op: 're', operands: [n(r.x), n(r.y), n(r.width), n(r.height)] })),
+    { op: 'f', operands: [] },
+    { op: 'Q', operands: [] },
+  ];
 }
 
 /** 墨消し処理を実行する */
 export async function redactPdf(
   originalBytes: ArrayBuffer,
   redactionMap: Map<number, PdfRect[]>,
+  options: RedactOptions = {},
 ): Promise<Uint8Array> {
-  const doc = await PDFDocument.load(originalBytes);
-  const pages = doc.getPages();
+  let doc: PDFDocument;
+  try {
+    doc = await PDFDocument.load(originalBytes, { updateMetadata: false });
+  } catch (e) {
+    // pdf-lib の読み込み方によってはクラスが別物になるので、名前と文言でも見る
+    if (e instanceof EncryptedPDFError || (e as Error).name === 'EncryptedPDFError' || /is encrypted/.test((e as Error).message)) {
+      throw new RedactionError('暗号化された PDF は墨消しできません。パスワードを外してから読み込んでください。');
+    }
+    throw new RedactionError(`PDF を読めません（${(e as Error).message}）。`);
+  }
+  if (doc.isEncrypted) {
+    throw new RedactionError('暗号化された PDF は墨消しできません。パスワードを外してから読み込んでください。');
+  }
 
-  for (const [pageNumOneBased, rects] of redactionMap) {
+  const ctx = doc.context;
+  let pages;
+  try {
+    pages = doc.getPages();
+  } catch (e) {
+    // 頁の木が循環しているなど、壊れた PDF
+    throw new RedactionError(`PDF の頁の作りが壊れていて読めません（${(e as Error).message}）。`);
+  }
+  const stats: RedactionStats = { glyphsRemoved: 0, imagesRedacted: 0, pathsRemoved: 0, pathsTrimmed: 0, formsRewritten: 0 };
+  const fontCache = new Map<PDFDict, Promise<FontModel>>();
+  const cmapLoader = options.cmapLoader ?? defaultCMapLoader();
+  const removedWidgets = new Set<PDFDict>();
+  const removedCodes = new Map<PDFDict, Set<number>>();
+  const replacedOriginals = new Set<PDFObject>();
+
+  for (const [pageNumber, rawRects] of redactionMap) {
+    let rects = mergeRects(normalizeRects(rawRects));
     if (rects.length === 0) continue;
-    const pageIndex = pageNumOneBased - 1;
+    const pageIndex = pageNumber - 1;
     if (pageIndex < 0 || pageIndex >= pages.length) continue;
+    const page = pages[pageIndex].node;
 
-    const page = pages[pageIndex];
-    const { height: pageHeight } = page.getSize();
-
-    // 小さな矩形をマージ
-    const mergedRects = mergeRects(rects);
-
-    // ContentStreamからテキストオペレーターを削除する
-    const pageDict = page.node;
-    const contentsRef = pageDict.get(PDFName.of('Contents'));
-
-    if (contentsRef) {
-      processContents(doc, contentsRef, mergedRects, pageHeight);
+    let ops: Operation[];
+    try {
+      ops = parseContentStream(pageContentBytes(doc, page));
+    } catch (e) {
+      throw new RedactionError(`${pageNumber} 頁の中身を読めません（${(e as Error).message}）。`);
     }
 
-    // 黒塗り矩形を描画（マージ済み矩形を使用）
-    for (const rect of mergedRects) {
-      page.drawRectangle({
-        x: rect.x,
-        y: rect.y,
-        width: rect.width,
-        height: rect.height,
-        color: rgb(0, 0, 0),
-      });
+    const resDict = inheritedAttr(page, 'Resources', doc);
+    if (rects.some((r) => r.source === 'text')) {
+      // 文字選択の範囲は、何も消さずに頁を読んで描かれるものの位置を集め、空いているところまで広げる
+      const observed: Observed[] = [];
+      await redactOperations(
+        {
+          ctx, rects: [], cmapLoader, fontCache, formStack: new Set(), pageNumber, removedCodes: new Map(),
+          stats: { glyphsRemoved: 0, imagesRedacted: 0, pathsRemoved: 0, pathsTrimmed: 0, formsRewritten: 0 },
+          observe: (o) => observed.push(o),
+        },
+        parseContentStream(pageContentBytes(doc, page)),
+        new ResourceEditor(ctx, resDict instanceof PDFDict ? resDict : undefined),
+        IDENTITY,
+      );
+      rects = mergeRects(extendTextRects(rects, observed, annotationRects(doc, page), pageBox(doc, page)));
     }
-  }
+    const resources = new ResourceEditor(ctx, resDict instanceof PDFDict ? resDict : undefined);
+    const rc: RedactionContext = {
+      ctx, rects, cmapLoader, fontCache, stats, formStack: new Set(), pageNumber, removedCodes, replacedOriginals,
+    };
+    const result = await redactOperations(rc, ops, resources, IDENTITY);
 
-  // メタデータクリア
-  cleanMetadata(doc);
+    const newOps = [...wrapBalanced(result.ops), ...blackBoxes(rects)];
+    page.set(PDFName.of('Contents'), ctx.register(ctx.flateStream(serializeOperations(newOps))));
+    if (resources.dict) page.set(PDFName.of('Resources'), resources.dict);
 
-  return doc.save();
-}
-
-/** Contents(単一またはArray)を処理する */
-function processContents(
-  doc: PDFDocument,
-  contentsRef: unknown,
-  rects: PdfRect[],
-  pageHeight: number,
-): void {
-  if (contentsRef instanceof PDFRef) {
-    const streamObj = doc.context.lookup(contentsRef);
-    const bytes = getStreamBytes(streamObj);
-    if (bytes) {
-      const newBytes = removeTextOperatorsFromStream(bytes, rects, pageHeight);
-      const newStream = doc.context.flateStream(newBytes);
-      doc.context.assign(contentsRef, newStream);
-    }
-  } else if (contentsRef instanceof PDFArray) {
-    for (let i = 0; i < contentsRef.size(); i++) {
-      const ref = contentsRef.get(i);
-      if (ref instanceof PDFRef) {
-        const streamObj = doc.context.lookup(ref);
-        const bytes = getStreamBytes(streamObj);
-        if (bytes) {
-          const newBytes = removeTextOperatorsFromStream(bytes, rects, pageHeight);
-          const newStream = doc.context.flateStream(newBytes);
-          doc.context.assign(ref, newStream);
-        }
-      }
+    for (const a of removeOverlappingAnnotations(ctx, page, rects)) {
+      removedWidgets.add(a);
+      stats.annotationsRemoved = (stats.annotationsRemoved ?? 0) + 1;
     }
   }
-}
 
+  // 消した注釈への返信（/IRT）とポップアップを、文書全体で消す（残すと、消した注釈がたどれて保存される）
+  if (removedWidgets.size > 0) {
+    const before = removedWidgets.size;
+    removeRepliesToRemoved(ctx, pages.map((p) => p.node), removedWidgets);
+    stats.annotationsRemoved = (stats.annotationsRemoved ?? 0) + (removedWidgets.size - before);
+  }
+  // 差し替えた元の画像・Form を、ほかの頁や親（Pages）の資源から指されたまま残さない
+  pruneReplacedOriginals(doc, replacedOriginals);
+  if (removedWidgets.size > 0) pruneFormFields(ctx, doc.catalog, removedWidgets);
+  // 消した文字の字形・幅・名前を、フォントからも消す（もう使われない符号だけ）
+  const fontStats = await scrubFonts(doc, removedCodes, fontCache, cmapLoader);
+  Object.assign(stats, fontStats);
+  sanitizeDocument(doc);
+  options.onStats?.(stats);
+  return doc.save({ updateFieldAppearances: false, addDefaultPage: false });
+}

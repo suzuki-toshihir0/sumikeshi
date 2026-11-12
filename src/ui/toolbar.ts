@@ -77,6 +77,24 @@ export class Toolbar {
     requestAnimationFrame(() => this.updateSlider());
   }
 
+  /** 墨消しの処理中は、もう一度押せないようにする */
+  setBusy(busy: boolean): void {
+    this.redactBtn.disabled = busy;
+    this.downloadBtn.disabled = busy;
+    // 処理中は、別の PDF を開くことと、範囲の消去・選び方の切り替えもさせない
+    this.fileInput.disabled = busy;
+    this.clearBtn.disabled = busy;
+    this.textModeBtn.disabled = busy;
+    this.rectModeBtn.disabled = busy;
+    this.redactBtn.title = busy ? '墨消しの処理中…' : '選択した範囲を墨消し';
+    document.body.style.cursor = busy ? 'progress' : '';
+  }
+
+  /** ダウンロードボタンを隠す（新しい PDF を開いたとき。前の文書の結果を落とせないように） */
+  hideDownload(): void {
+    this.downloadBtn.hidden = true;
+  }
+
   /** ダウンロードボタンを表示する */
   showDownload(): void {
     this.downloadBtn.hidden = false;

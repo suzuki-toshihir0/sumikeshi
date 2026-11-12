@@ -250,11 +250,34 @@ html, body {
   line-height: 1.0;
 }
 
+/* 回転した頁（/Rotate）では、pdf.js がテキストレイヤーの幅と高さを入れ替え、data-main-rotation を付ける。
+   回転は表示側の CSS に任される（pdfjs-dist/web/pdf_viewer.css と同じ規則） */
+#text-layer[data-main-rotation] {
+  right: auto;
+  bottom: auto;
+  transform-origin: 0 0;
+}
+
+#text-layer[data-main-rotation="90"] {
+  transform: rotate(90deg) translateY(-100%);
+}
+
+#text-layer[data-main-rotation="180"] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+
+#text-layer[data-main-rotation="270"] {
+  transform: rotate(270deg) translateX(-100%);
+}
+
 #text-layer span {
   position: absolute;
   white-space: pre;
   color: transparent;
   pointer-events: none;
+  /* pdf.js は span を横に伸縮（scaleX）して PDF の文字列の幅に合わせる。起点を左上にしないと、
+     span が左右にずれ、文字選択の範囲が実際の字からずれる（pdfjs-dist/web/pdf_viewer.css と同じ） */
+  transform-origin: 0% 0%;
 }
 
 #text-layer.selecting-text span {
