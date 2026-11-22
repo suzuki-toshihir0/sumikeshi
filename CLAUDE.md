@@ -1,6 +1,6 @@
 # sumikeshi
 
-ブラウザ上で動作するPDF墨消しツール。PDF内のテキストデータを完全削除し、黒塗り矩形を重ねたPDFを生成する。
+ブラウザ上で動作するPDF・画像の墨消しツール。PDF内のテキストデータを完全削除し、黒塗り矩形を重ねたPDFを生成する。写真などの画像は、範囲の画素を黒に置き換え、メタデータの無い画像として書き出す（下の「画像の墨消し」）。
 
 ## コマンド
 
@@ -16,13 +16,14 @@
 ### ディレクトリ構成
 
 - `src/` — ソースコード（Viteのroot）
-  - `viewer/` — PDF.jsによるPDF表示・テキストレイヤー
+  - `viewer/` — PDF.jsによるPDF表示・テキストレイヤー、画像の表示（`image-viewer.ts`）
   - `selection/` — テキスト選択・矩形選択モード
-  - `redaction/` — 墨消し処理（下の「墨消し処理フロー」）
+  - `redaction/` — PDF の墨消し処理（下の「墨消し処理フロー」）
+  - `image/` — 画像の墨消し（下の「画像の墨消し」）
   - `ui/` — ツールバー、ページナビ、オーバーレイ
   - `utils/` — 座標変換、ファイルI/O
 - `tests/unit/` — Vitestによる単体テスト
-- `tests/e2e/` — Playwrightによるe2eテスト（`basic.spec.ts`=デスクトップ、`mobile.spec.ts`=モバイル）
+- `tests/e2e/` — Playwrightによるe2eテスト（`basic.spec.ts` `redaction.spec.ts` `photo.spec.ts`=デスクトップ、`mobile.spec.ts`=モバイル）。`photo.spec.ts` の素材は試験の中で canvas から作り、`helpers/photo-meta.ts` で Exif（位置情報・縮小画像）・XMP・コメント・PNG の文字の欄を仕込む
 - `tests/fixtures/` — テスト用PDF（`npx tsx tests/fixtures/generate-sample.ts` で再生成可能）
 
 ### 技術スタック
@@ -40,6 +41,18 @@
 - **WebAssembly**: JPEG 2000 の復号器（pdf.js の OpenJPEG）のため、CSP の `script-src` に `'wasm-unsafe-eval'` を入れている。
 - **本番依存は2つのみ**: `pdfjs-dist` と `pdf-lib`。フレームワークは使わない（Vanilla TS）。
 - **ArrayBufferのコピー**: pdfjs-distはWorkerにArrayBufferをtransferしてdetachedにするため、pdf-lib用に `.slice(0)` でコピーを保持する必要がある（`main.ts` の `loadFile`）。
+
+### 画像の墨消し（src/image/）
+
+PDF の墨消しとは別の道で、Worker も pdf-lib も使わない。範囲は PDF と同じ `PdfRect`（左下を原点、1 画素を 1 単位）で持ち、選択と枠の表示は PDF と同じ部品を使う（`utils/coordinates.ts` の `imageViewport` が、pdf.js の `PageViewport` と同じ形の座標の変換を作る。型は `PageView`）。
+
+1. `image-format.ts`: 形式は中身の先頭のバイトで決める（iPhone は JPEG に変えた写真に .heic の名前を残すことがある）。書き出しは JPEG・HEIC → JPEG（画質 0.95）、PNG・WebP・AVIF → PNG
+2. `image-document.ts`: `createImageBitmap`（`imageOrientation: 'from-image'`）で読み、Exif の向きを当てて canvas に描く。読めなければ img 要素で読む（HEIC は Safari でだけ読める）。持つのは canvas の画素だけで、元のファイルのバイト列（Exif・XMP など）は持たない
+3. 墨消し: 範囲の画素の箱（外向きに丸める）を `putImageData` で不透明の黒に置き換え（下の画素と混ぜない）、読み直して黒になったことを確かめる。画像全体の画素は読み出さない（4800 万画素で約 195MB になる）
+4. 書き出し: canvas の `toBlob` で圧縮し直す（メタデータは入らない）。書き出したものを読み直し、大きさと、これまでに墨消ししたすべての範囲が黒いこと（JPEG は端の 16 画素を除き、各色 24 以下）を確かめてから渡す。続けて墨消しするときは手元の画素に重ねるので、JPEG を読み直して圧縮し直すことはない
+5. `image-paint.ts`: canvas に載らない大きさは開かない（iOS の Safari は 1 辺 8192 画素、面積 67,108,864 画素まで。超えると黙って何も描かない）
+
+扱わないもの: 動画、GIF、複数の頁の TIFF、Live Photos の動画の部分。色の管理（ICC プロファイル）は書き出しで外れ、iPhone の Display P3 の写真は sRGB になる。指紋の対策で canvas の読み出しを乱すブラウザ（Firefox の resistFingerprinting など）では、4 の確かめで止まることがある（乱れた画像は渡さない）。
 
 ### 墨消し処理フロー（src/redaction/）
 

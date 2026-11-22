@@ -1,4 +1,4 @@
-import type { PageViewport } from 'pdfjs-dist';
+import type { PageView } from '../utils/coordinates';
 import type { SelectionMode } from '../ui/toolbar';
 import type { RedactionStore } from '../redaction/redaction-store';
 import { TextSelection } from './text-selection';
@@ -33,7 +33,7 @@ export class SelectionManager {
   }
 
   /** ページ情報を更新する */
-  setPageContext(pageNum: number, viewport: PageViewport): void {
+  setPageContext(pageNum: number, viewport: PageView): void {
     this.textSelection.setPageContext(pageNum, viewport);
     this.rectSelection.setPageContext(pageNum, viewport);
   }

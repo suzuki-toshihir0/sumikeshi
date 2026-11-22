@@ -1,11 +1,10 @@
-import type { PageViewport } from 'pdfjs-dist';
 import type { RedactionStore } from '../redaction/redaction-store';
-import { cssToPdfRect } from '../utils/coordinates';
+import { cssToPdfRect, type PageView } from '../utils/coordinates';
 
 export class RectSelection {
   private enabled = false;
   private pageNum = 1;
-  private viewport: PageViewport | null = null;
+  private viewport: PageView | null = null;
   private isDragging = false;
   private startX = 0;
   private startY = 0;
@@ -34,7 +33,7 @@ export class RectSelection {
     this.pageContainerEl.style.touchAction = enabled ? 'none' : '';
   }
 
-  setPageContext(pageNum: number, viewport: PageViewport): void {
+  setPageContext(pageNum: number, viewport: PageView): void {
     this.pageNum = pageNum;
     this.viewport = viewport;
   }

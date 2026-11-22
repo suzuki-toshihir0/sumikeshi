@@ -1,11 +1,10 @@
-import type { PageViewport } from 'pdfjs-dist';
 import type { RedactionStore } from '../redaction/redaction-store';
-import { cssToPdfRect } from '../utils/coordinates';
+import { cssToPdfRect, type PageView } from '../utils/coordinates';
 
 export class TextSelection {
   private enabled = false;
   private pageNum = 1;
-  private viewport: PageViewport | null = null;
+  private viewport: PageView | null = null;
   private selectionChangeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 選択追加時コールバック */
@@ -23,7 +22,7 @@ export class TextSelection {
     this.enabled = enabled;
   }
 
-  setPageContext(pageNum: number, viewport: PageViewport): void {
+  setPageContext(pageNum: number, viewport: PageView): void {
     this.pageNum = pageNum;
     this.viewport = viewport;
   }

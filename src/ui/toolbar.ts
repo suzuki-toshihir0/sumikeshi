@@ -69,6 +69,22 @@ export class Toolbar {
     this.modeSlider.style.width = `${btnRect.width}px`;
   }
 
+  /**
+   * 開いたものに合わせて選び方を切り替える。画像には文字が無いので矩形選択だけにする。
+   * 画像から PDF に戻ったときは、PDF の既定の文字選択に戻す
+   */
+  setDocumentKind(kind: 'pdf' | 'image'): void {
+    if (kind === 'image') {
+      this.textModeBtn.hidden = true;
+      this.setMode('rect');
+    } else if (this.textModeBtn.hidden) {
+      this.textModeBtn.hidden = false;
+      this.setMode('text');
+    }
+    // ボタンの数が変わるので、表示の後にスライダーを合わせ直す
+    requestAnimationFrame(() => this.updateSlider());
+  }
+
   /** PDF読み込み後にUIを表示する */
   showControls(): void {
     this.modeGroups.forEach((el) => { el.hidden = false; });
@@ -81,7 +97,7 @@ export class Toolbar {
   setBusy(busy: boolean): void {
     this.redactBtn.disabled = busy;
     this.downloadBtn.disabled = busy;
-    // 処理中は、別の PDF を開くことと、範囲の消去・選び方の切り替えもさせない
+    // 処理中は、別のファイルを開くことと、範囲の消去・選び方の切り替えもさせない
     this.fileInput.disabled = busy;
     this.clearBtn.disabled = busy;
     this.textModeBtn.disabled = busy;
@@ -90,7 +106,7 @@ export class Toolbar {
     document.body.style.cursor = busy ? 'progress' : '';
   }
 
-  /** ダウンロードボタンを隠す（新しい PDF を開いたとき。前の文書の結果を落とせないように） */
+  /** ダウンロードボタンを隠す（新しいファイルを開いたとき。前の文書の結果を落とせないように） */
   hideDownload(): void {
     this.downloadBtn.hidden = true;
   }

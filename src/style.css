@@ -150,6 +150,8 @@ html, body {
 }
 
 /* アクションボタン */
+/* 画像を開いたときは、文字選択のボタンを隠す */
+.mode-btn[hidden],
 .action-btn[hidden] {
   display: none;
 }

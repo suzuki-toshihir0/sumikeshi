@@ -13,7 +13,7 @@ export default defineConfig({
   projects: [
     {
       name: 'desktop',
-      testMatch: /(basic|redaction)\.spec\.ts/,
+      testMatch: /(basic|redaction|photo)\.spec\.ts/,
     },
     {
       name: 'mobile',

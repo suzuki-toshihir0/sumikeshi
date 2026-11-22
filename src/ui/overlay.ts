@@ -1,6 +1,5 @@
-import type { PageViewport } from 'pdfjs-dist';
 import type { RedactionStore } from '../redaction/redaction-store';
-import { pdfToCssRect } from '../utils/coordinates';
+import { pdfToCssRect, type PageView } from '../utils/coordinates';
 
 export class Overlay {
   private container: HTMLElement;
@@ -15,7 +14,7 @@ export class Overlay {
   }
 
   /** 現在のページのオーバーレイを再描画する */
-  render(pageNum: number, viewport: PageViewport): void {
+  render(pageNum: number, viewport: PageView): void {
     // 墨消し矩形以外の要素(ドラッグ中の矩形等)は保持する
     this.container.querySelectorAll('.redaction-rect').forEach((el) => el.remove());
 
