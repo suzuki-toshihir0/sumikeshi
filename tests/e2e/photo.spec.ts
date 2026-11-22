@@ -405,6 +405,26 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('.redaction-rect')).toHaveCount(0);
   });
 
+  test('PDF の読み込み中に開けないファイルを選んでも、PDF はそのまま範囲を選べる', async ({ page }) => {
+    await page.route('**/pdf.worker*', async (route) => {
+      await new Promise((r) => setTimeout(r, 2500));
+      await route.continue();
+    });
+    await page.goto('/');
+    page.on('dialog', (d) => d.dismiss());
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await openFile(page, 'a.gif', new TextEncoder().encode('GIF89a\x01\x00\x01\x00'), 'image/gif');
+    await expect(page.locator('#page-info')).toContainText('1 / 2', { timeout: 10000 });
+    const span = page.locator('#text-layer span').first();
+    await expect(span).toBeAttached();
+    const box = (await span.boundingBox())!;
+    await page.mouse.move(box.x + 1, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width - 1, box.y + box.height / 2, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect').first()).toBeVisible();
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');
