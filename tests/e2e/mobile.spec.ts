@@ -244,6 +244,23 @@ test.describe('モバイル対応', () => {
       expect(await page.locator('.redaction-rect').count()).toBe(0);
     });
 
+    test('2 本目の指がページの外に触れ、それを先に離しても、範囲を作らない', async ({ page }) => {
+      const box = await openInRectMode(page);
+      const a = { x: box.x + 60, y: box.y + 80 };
+      const a2 = { x: a.x + 40, y: a.y + 30 };
+      // 2 本目の指はツールバーの上（ページの入れ物の外）
+      const toolbar = (await page.locator('#toolbar').boundingBox())!;
+      const outside = { x: toolbar.x + toolbar.width - 10, y: toolbar.y + toolbar.height / 2 };
+      await touch(page, 'touchStart', [a]);
+      await touch(page, 'touchMove', [a2]);
+      await touch(page, 'touchStart', [a2, outside]);
+      // 2 本目（ページの外）を先に離し、そのあと 1 本目を離す
+      await touch(page, 'touchEnd', [a2]);
+      await touch(page, 'touchEnd', []);
+      expect(await page.locator('.redaction-rect').count()).toBe(0);
+      expect(await page.locator('.rect-drawing').count()).toBe(0);
+    });
+
     test('描きかけの途中でタッチが打ち切られたら（touchcancel）、描きかけの枠を捨てる', async ({ page }) => {
       const box = await openInRectMode(page);
       const a = { x: box.x + 60, y: box.y + 80 };

@@ -9,6 +9,8 @@ export class RectSelection {
   private startX = 0;
   private startY = 0;
   private drawingEl: HTMLDivElement | null = null;
+  /** タッチで描いているときの、描き始めた指の識別子 */
+  private dragTouchId: number | null = null;
 
   /** 選択追加時コールバック */
   onSelectionAdded: (() => void) | null = null;
@@ -22,6 +24,8 @@ export class RectSelection {
     document.addEventListener('mousemove', this.handleMouseMove);
     document.addEventListener('mouseup', this.handleMouseUp);
     this.pageContainerEl.addEventListener('touchstart', this.handleTouchStart, { passive: false });
+    // 2 本目の指は、ページの外（ツールバーなど）に触れることもあるので、文書全体で見張る
+    document.addEventListener('touchstart', this.handleAnyTouchStart);
     document.addEventListener('touchmove', this.handleTouchMove, { passive: false });
     document.addEventListener('touchend', this.handleTouchEnd);
     // iOS がタッチを打ち切ったとき（ピンチやスクロールの操作に移ったときなど）は、描きかけの枠を捨てる
@@ -134,6 +138,7 @@ export class RectSelection {
     this.startX = touch.clientX - containerRect.left;
     this.startY = touch.clientY - containerRect.top;
     this.isDragging = true;
+    this.dragTouchId = touch.identifier;
 
     this.drawingEl = document.createElement('div');
     this.drawingEl.className = 'rect-drawing';
@@ -146,6 +151,16 @@ export class RectSelection {
     e.preventDefault();
   };
 
+  /** どこかで 2 本目の指が触れたら、描きかけの枠を捨てる（ピンチとしてブラウザに任せる） */
+  private handleAnyTouchStart = (e: TouchEvent): void => {
+    if (this.isDragging && e.touches.length > 1) this.cancelDrag();
+  };
+
+  /** 描き始めた指のタッチ（無ければ null） */
+  private dragTouch(list: TouchList): Touch | null {
+    return Array.from(list).find((t) => t.identifier === this.dragTouchId) ?? null;
+  }
+
   private handleTouchMove = (e: TouchEvent): void => {
     if (!this.isDragging || !this.drawingEl) return;
     // 2 本指になったら、ピンチとしてブラウザに任せる
@@ -154,7 +169,8 @@ export class RectSelection {
       return;
     }
 
-    const touch = e.touches[0];
+    const touch = this.dragTouch(e.touches);
+    if (!touch) return;
     const containerRect = this.pageContainerEl.getBoundingClientRect();
     const currentX = touch.clientX - containerRect.left;
     const currentY = touch.clientY - containerRect.top;
@@ -174,9 +190,20 @@ export class RectSelection {
 
   private handleTouchEnd = (e: TouchEvent): void => {
     if (!this.isDragging || !this.drawingEl || !this.viewport) return;
+    // まだほかの指が触れていれば 2 本指の操作なので、範囲にしない
+    if (e.touches.length > 0) {
+      this.cancelDrag();
+      return;
+    }
+    // 離れたのが描き始めた指でなければ、範囲にしない（終点を取り違えない）
+    const touch = this.dragTouch(e.changedTouches);
+    if (!touch) {
+      this.cancelDrag();
+      return;
+    }
     this.isDragging = false;
+    this.dragTouchId = null;
 
-    const touch = e.changedTouches[0];
     const containerRect = this.pageContainerEl.getBoundingClientRect();
     const endX = touch.clientX - containerRect.left;
     const endY = touch.clientY - containerRect.top;
@@ -203,6 +230,7 @@ export class RectSelection {
   /** 描きかけの枠を捨てる。参照を失った枠が残っていても、まとめて消す */
   cancelDrag(): void {
     this.isDragging = false;
+    this.dragTouchId = null;
     this.drawingEl = null;
     this.overlayEl.querySelectorAll('.rect-drawing').forEach((el) => el.remove());
   }
@@ -212,6 +240,7 @@ export class RectSelection {
     document.removeEventListener('mousemove', this.handleMouseMove);
     document.removeEventListener('mouseup', this.handleMouseUp);
     this.pageContainerEl.removeEventListener('touchstart', this.handleTouchStart);
+    document.removeEventListener('touchstart', this.handleAnyTouchStart);
     document.removeEventListener('touchmove', this.handleTouchMove);
     document.removeEventListener('touchend', this.handleTouchEnd);
     document.removeEventListener('touchcancel', this.handleTouchCancel);
