@@ -103,7 +103,14 @@ export class PdfViewer {
     this.onRenderStart?.();
     const pageChanged = pageNum !== this._currentPageNumber;
     this._currentPageNumber = pageNum;
-    const page = await doc.getPage(pageNum);
+    let page: PDFPageProxy;
+    try {
+      page = await doc.getPage(pageNum);
+    } catch (err) {
+      // 文書を閉じた（destroy）ことで取り消された描画は、pdf.js が「Transport destroyed」で失敗する。何もしない
+      if (superseded()) return;
+      throw err;
+    }
     if (superseded()) return;
     this.currentPage = page;
     this.scale = this.calcFitWidthScale(page);
@@ -131,7 +138,13 @@ export class PdfViewer {
     if (superseded()) return;
 
     // テキストレイヤー描画
-    const textContent = await page.getTextContent();
+    let textContent: Awaited<ReturnType<PDFPageProxy['getTextContent']>>;
+    try {
+      textContent = await page.getTextContent();
+    } catch (err) {
+      if (superseded()) return;
+      throw err;
+    }
     if (superseded()) return;
     try {
       await renderTextLayer(this.textLayerEl, textContent, viewport);

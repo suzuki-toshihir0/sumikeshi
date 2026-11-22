@@ -78,7 +78,11 @@ class App {
       this.selection.setPageContext(pageNum, viewport);
       this.overlay.render(pageNum, viewport);
     };
-    this.viewer.onRenderStart = () => this.selection.clearPageContext();
+    // 頁を描き直している間は、前の頁の座標で範囲を選ばせず、前の頁の範囲の枠も出さない（描き終えたら onPageRendered で戻す）
+    this.viewer.onRenderStart = () => {
+      this.selection.clearPageContext();
+      this.overlay.clear();
+    };
     this.imageViewer.onPageRendered = (pageNum, viewport) => {
       this.selection.setPageContext(pageNum, viewport);
       this.overlay.render(pageNum, viewport);

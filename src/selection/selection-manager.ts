@@ -10,6 +10,8 @@ export class SelectionManager {
   private _mode: SelectionMode = 'text';
   /** 範囲を選ばせてよいか。止めている間（墨消しの処理中、次の文書の読み込み中）は、選び方を切り替えても有効にしない */
   private active = false;
+  /** 頁の座標があるか（頁を描き直している間は無い） */
+  private hasPageContext = false;
   private textLayerEl: HTMLElement;
   private pageContainerEl: HTMLElement;
 
@@ -40,26 +42,37 @@ export class SelectionManager {
   setPageContext(pageNum: number, viewport: PageView): void {
     this.textSelection.setPageContext(pageNum, viewport);
     this.rectSelection.setPageContext(pageNum, viewport);
+    this.hasPageContext = true;
+    this.publish();
   }
 
   /** 頁の座標を外す。頁を描き直している間は、前の頁の座標と頁番号で範囲を選ばない（描き終えたら setPageContext で戻す） */
   clearPageContext(): void {
     this.textSelection.clearPageContext();
     this.rectSelection.clearPageContext();
+    this.hasPageContext = false;
+    this.publish();
+  }
+
+  /**
+   * 範囲を選べるか（選択が有効で、頁の座標がある）を、#page-container の data-selectable に出す。
+   * E2E と画面の性質の試験（tests/pbt）は、これを見て範囲を選ぶ
+   */
+  private publish(): void {
+    this.pageContainerEl.dataset.selectable = String(this.active && this.hasPageContext);
   }
 
   /** 選択を有効化する */
   enable(): void {
     this.active = true;
-    // 範囲を選べるかを外から見えるようにする（E2E は、これを待ってから範囲を選ぶ）
-    this.pageContainerEl.dataset.selectable = 'true';
+    this.publish();
     this.setMode(this._mode);
   }
 
   /** 選択を無効化する */
   disable(): void {
     this.active = false;
-    this.pageContainerEl.dataset.selectable = 'false';
+    this.publish();
     this.textSelection.setEnabled(false);
     this.rectSelection.setEnabled(false);
   }
