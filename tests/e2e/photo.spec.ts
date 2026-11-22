@@ -700,6 +700,77 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('#page-wrapper')).toBeVisible();
   });
 
+  test('頁の描画の途中に画像を開いて PDF を閉じても、取り消された描画の失敗を残さない（Bombadil で見つけた）', async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    // pdf.js の Worker からの返事を、合図があれば 1 秒遅らせる（Worker を作る前に仕込む）
+    await page.addInitScript(() => {
+      const add = Worker.prototype.addEventListener;
+      Worker.prototype.addEventListener = function (this: Worker, type: string, listener: EventListenerOrEventListenerObject, ...rest: unknown[]) {
+        if (type !== 'message') return (add as (...a: unknown[]) => void).call(this, type, listener, ...rest);
+        const delayed = (e: Event) => {
+          const call = () => (typeof listener === 'function' ? listener.call(this, e) : listener.handleEvent(e));
+          if ((window as unknown as { __delayIncoming?: boolean }).__delayIncoming) setTimeout(call, 1000);
+          else call();
+        };
+        return (add as (...a: unknown[]) => void).call(this, type, delayed, ...rest);
+      } as typeof Worker.prototype.addEventListener;
+    });
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    for (const label of ['PAGE-ONE', 'PAGE-TWO']) doc.addPage([400, 300]).drawText(label, { x: 50, y: 150, size: 24, font });
+    await page.goto('/');
+    await openFile(page, 'two.pdf', await doc.save(), 'application/pdf');
+    await waitForRender(page);
+    const png = await makeImage(page, 200, 100, 'image/png');
+    await page.evaluate(() => {
+      (window as unknown as { __delayIncoming?: boolean }).__delayIncoming = true;
+    });
+    // 2 頁目を頼み（返事は 1 秒後）、その間に画像を開く（PDF の文書を閉じる）
+    await page.locator('#btn-next').click();
+    await openFile(page, 'a.png', png, 'image/png');
+    await waitForRender(page);
+    await page.waitForTimeout(2500);
+    expect(errors).toEqual([]);
+    await expect(page.locator('#btn-text-mode')).toBeHidden();
+  });
+
+  test('頁の描画の途中は、前の頁の範囲の枠を出さない（Bombadil で見つけた）', async ({ page }) => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    for (const label of ['PAGE-ONE', 'PAGE-TWO']) doc.addPage([400, 300]).drawText(label, { x: 50, y: 150, size: 24, font });
+    await page.goto('/');
+    await openFile(page, 'two.pdf', await doc.save(), 'application/pdf');
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    const box = (await page.locator('#pdf-canvas').boundingBox())!;
+    await page.mouse.move(box.x + 30, box.y + 30);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 150, box.y + 90, { steps: 3 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+    await page.evaluate(() => {
+      const post = Worker.prototype.postMessage;
+      let first = true;
+      Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+        const delay = first ? 1500 : 0;
+        first = false;
+        setTimeout(() => (post as (...a: unknown[]) => void).apply(this, args), delay);
+      } as typeof Worker.prototype.postMessage;
+    });
+    await page.locator('#btn-next').click();
+    // 2 頁目の描画の途中（頁番号はまだ 1）に、1 頁目の枠が残っていない（待ち直さず、その時点の数を見る）
+    await page.waitForTimeout(300);
+    expect(await page.locator('#page-info').textContent()).toContain('1 / 2');
+    expect(await page.locator('.redaction-rect').count()).toBe(0);
+    await expect(page.locator('#page-info')).toContainText('2 / 2', { timeout: 5000 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+    // 1 頁目に戻れば、枠はまた出る
+    await page.locator('#btn-prev').click();
+    await expect(page.locator('#page-info')).toContainText('1 / 2');
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');

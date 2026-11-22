@@ -9,6 +9,7 @@
 - `npm run test` — 単体テスト実行（Vitest）
 - `npm run test:watch` — 単体テストをwatchモードで実行
 - `npm run test:e2e` — E2Eテスト実行（Playwright）
+- `npm run test:pbt` — 画面の性質の試験（Bombadil。既定 3 分。`bash tests/pbt/run.sh 10m out.bin` で時間とトレースの書き出し先を変えられる）
 - `npx tsc --noEmit` — 型チェックのみ
 
 ## アーキテクチャ
@@ -99,6 +100,16 @@ PDF の墨消しとは別の道で、Worker も pdf-lib も使わない。範囲
 - `tests/unit/redaction-leaks.test.ts` `redaction-cases.test.ts`: 墨消し後の PDF を pdf.js（`tests/unit/helpers/pdf-oracle.ts`）で読み直し、範囲の文字・画素・パス・注釈・メタデータが残らないことを確かめる。展開したすべてのストリームに秘密の文字列が無いことも見る
 - 素材は `tests/fixtures/real/`（中身はすべて架空）。作り方は `generate.sh` と `build-pdfs.ts`
 - `tests/e2e/redaction.spec.ts`: ブラウザで範囲を選んで墨消しし、ダウンロードした PDF を確かめる
+
+### 性質の試験（property-based testing）
+
+- **単体（fast-check）**: `tests/unit/image-properties.test.ts`。画像の純粋な関数（範囲を画素の箱にする丸め、座標の往復、表示用の canvas の大きさ、確かめる箱、形式の判定など）を、ランダムな入力で確かめる。`npm run test` に含まれる
+- **画面（Bombadil）**: `tests/pbt/`。[Bombadil](https://github.com/antithesishq/bombadil)（npm の `@antithesishq/bombadil` に Linux・macOS の実行ファイルが同梱。Chrome は `CHROME` の環境変数か PATH から探す）が、ファイルを開く・範囲を選ぶ・墨消し・頁送り・ダウンロード・画面の大きさの変更をランダムに行い、`spec.ts` の性質（線形時相論理）が毎状態で成り立つかを見る
+  - 素材（`make-fixtures.ts` が `.fixtures/` に作る）は、頁・画像ごとに背景の色を変えてあり（`palette.ts`）、canvas の左上の色で何が表示されているかを見分ける
+  - 仕込みの操作（`installShim`）で、alert の記録、範囲の記録（枠が描き直されるたびに頁ごとに覚え、墨消しを押したら全頁の分を記録する。文書が替わったかは `#page-container` の `data-doc-revision` で見る）、非同期の処理へのランダムな遅れを入れる。pdf.js の Worker へのやり取りは順番を保って遅らせる（入れ替えると pdf.js 自体が壊れる）
+  - 主な性質: 表示の食い違いが無い（canvas・文字のレイヤー・頁番号・ボタン）、最後に選んだファイルがいつか表示され、表示された後は前のファイルに戻らない、処理中は選べない、墨消しの後に結果を落とせるなら、その文書で墨消しした範囲はどの頁でも黒い、想定外の知らせ・捕まえていない例外が無い
+  - 破れたら終了コード 2。トレースは `npx bombadil browser inspect <トレース>`（画面）か `npx bombadil trace <トレース> --json` で見る。見つけた破れは、E2E で再現してから直す
+  - 仕様の書き方: `always` などは `@antithesishq/bombadil`、`extract` などは `@antithesishq/bombadil/browser` から読む。手元のファイルの import は拡張子（`.ts`）まで書く。export した操作の生成器はすべて登録されるので、まとめたもの（`all`）と仕込み（`setup`）だけを export する。負の座標の操作を作ると止まる
 
 ### E2Eテストの注意事項
 

@@ -21,10 +21,13 @@ export interface PixelBox {
  * 一部でもかかる画素は入れ（外向きに丸める）、画像の外は切る。かからなければ null
  */
 export function toPixelBox(rect: PdfRect, width: number, height: number): PixelBox | null {
+  // 面積 0 の範囲は、どの画素とも正の面積で重ならない（非整数の位置で、丸めにより 1 列・1 行を塗らないように）
+  if (!(rect.width > 0 && rect.height > 0)) return null;
   const x0 = Math.max(0, Math.floor(rect.x));
   const x1 = Math.min(width, Math.ceil(rect.x + rect.width));
-  const y0 = Math.max(0, Math.floor(height - (rect.y + rect.height)));
-  const y1 = Math.min(height, Math.ceil(height - rect.y));
+  // 下からの座標のまま整数に丸めてから、上からの行に直す（height - y を先に計算すると、丸めで縁の行を落とすことがある）
+  const y0 = Math.max(0, height - Math.ceil(rect.y + rect.height));
+  const y1 = Math.min(height, height - Math.floor(rect.y));
   if (x0 >= x1 || y0 >= y1) return null;
   return { x0, y0, x1, y1 };
 }
