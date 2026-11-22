@@ -33,6 +33,11 @@ for _ in $(seq 1 50); do
 done
 $ready || { echo "vite preview が答えません" >&2; exit 1; }
 
-npx bombadil browser test --headless --exit-on-violation --time-limit "$limit" \
+# CI（GitHub Actions の Ubuntu 24.04 以降）では、権限の無い利用者の名前空間が制限されていて、Chrome のサンドボックスが
+# 起動できないことがあるので外す（Playwright は自分で外すが、Bombadil は外さない）
+extra=()
+if [ -n "${CI:-}" ]; then extra+=(--no-sandbox); fi
+
+npx bombadil browser test --headless --exit-on-violation --time-limit "$limit" "${extra[@]}" \
   --output-path "$out" --output-path-overwrite \
   "http://localhost:$port/sumikeshi/" tests/pbt/spec.ts
