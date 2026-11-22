@@ -36,6 +36,8 @@ export class RectSelection {
   }
 
   setPageContext(pageNum: number, viewport: PageView): void {
+    // 頁の座標が替わったら、前の座標で押し始めたドラッグは捨てる
+    this.cancelDrag();
     this.pageNum = pageNum;
     this.viewport = viewport;
   }
@@ -47,7 +49,8 @@ export class RectSelection {
   }
 
   private handleMouseDown = (e: MouseEvent): void => {
-    if (!this.enabled || e.button !== 0) return;
+    // 頁を描き直している間（座標が無い間）は、ドラッグを始めない
+    if (!this.enabled || !this.viewport || e.button !== 0) return;
     // 既存の墨消し矩形をクリックした場合はドラッグ開始しない
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;
 
@@ -110,7 +113,7 @@ export class RectSelection {
   };
 
   private handleTouchStart = (e: TouchEvent): void => {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.viewport) return;
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;
 
     const touch = e.touches[0];
