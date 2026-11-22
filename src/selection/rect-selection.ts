@@ -24,6 +24,8 @@ export class RectSelection {
     this.pageContainerEl.addEventListener('touchstart', this.handleTouchStart, { passive: false });
     document.addEventListener('touchmove', this.handleTouchMove, { passive: false });
     document.addEventListener('touchend', this.handleTouchEnd);
+    // iOS がタッチを打ち切ったとき（ピンチやスクロールの操作に移ったときなど）は、描きかけの枠を捨てる
+    document.addEventListener('touchcancel', this.handleTouchCancel);
   }
 
   setEnabled(enabled: boolean): void {
@@ -32,7 +34,8 @@ export class RectSelection {
     if (!enabled) this.cancelDrag();
     this.overlayEl.style.pointerEvents = enabled ? 'auto' : 'none';
     this.pageContainerEl.style.cursor = enabled ? 'crosshair' : '';
-    this.pageContainerEl.style.touchAction = enabled ? 'none' : '';
+    // 1 本指の移動（スクロール）は止めて範囲の選択に使い、2 本指の拡大・縮小（ピンチ）は止めない（細かい範囲を選ぶため）
+    this.pageContainerEl.style.touchAction = enabled ? 'pinch-zoom' : '';
   }
 
   setPageContext(pageNum: number, viewport: PageView): void {
@@ -55,6 +58,8 @@ export class RectSelection {
     // 既存の墨消し矩形をクリックした場合はドラッグ開始しない
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;
 
+    // 前の描きかけの枠が残っていれば消してから始める（参照を失って画面に置き去りにしない）
+    this.cancelDrag();
     const containerRect = this.pageContainerEl.getBoundingClientRect();
     this.startX = e.clientX - containerRect.left;
     this.startY = e.clientY - containerRect.top;
@@ -115,8 +120,15 @@ export class RectSelection {
 
   private handleTouchStart = (e: TouchEvent): void => {
     if (!this.enabled || !this.viewport) return;
+    // 2 本目の指が触れたら、ピンチとしてブラウザに任せる。描きかけの枠は捨て、preventDefault しない
+    if (e.touches.length > 1) {
+      this.cancelDrag();
+      return;
+    }
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;
 
+    // 前の描きかけの枠が残っていれば消してから始める（参照を失って画面に置き去りにしない）
+    this.cancelDrag();
     const touch = e.touches[0];
     const containerRect = this.pageContainerEl.getBoundingClientRect();
     this.startX = touch.clientX - containerRect.left;
@@ -136,6 +148,11 @@ export class RectSelection {
 
   private handleTouchMove = (e: TouchEvent): void => {
     if (!this.isDragging || !this.drawingEl) return;
+    // 2 本指になったら、ピンチとしてブラウザに任せる
+    if (e.touches.length > 1) {
+      this.cancelDrag();
+      return;
+    }
 
     const touch = e.touches[0];
     const containerRect = this.pageContainerEl.getBoundingClientRect();
@@ -179,10 +196,15 @@ export class RectSelection {
     this.drawingEl = null;
   };
 
-  private cancelDrag(): void {
+  private handleTouchCancel = (): void => {
+    this.cancelDrag();
+  };
+
+  /** 描きかけの枠を捨てる。参照を失った枠が残っていても、まとめて消す */
+  cancelDrag(): void {
     this.isDragging = false;
-    this.drawingEl?.remove();
     this.drawingEl = null;
+    this.overlayEl.querySelectorAll('.rect-drawing').forEach((el) => el.remove());
   }
 
   destroy(): void {
@@ -192,5 +214,6 @@ export class RectSelection {
     this.pageContainerEl.removeEventListener('touchstart', this.handleTouchStart);
     document.removeEventListener('touchmove', this.handleTouchMove);
     document.removeEventListener('touchend', this.handleTouchEnd);
+    document.removeEventListener('touchcancel', this.handleTouchCancel);
   }
 }

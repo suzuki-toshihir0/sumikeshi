@@ -99,6 +99,8 @@ class App {
     this.toolbar.onClear = () => {
       if (this.busy) return;
       this.store.clear();
+      // 描きかけの枠も消す（画面に 1 つも枠を残さない）
+      this.selection.cancelDrawing();
       this.refreshOverlay();
     };
 

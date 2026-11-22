@@ -34,6 +34,10 @@ type Pbt = {
   lastFile: LastFile | null;
   /** 範囲を選べる状態で表示されたことのある、最後に選んだファイルの番号 */
   shownSeq: number;
+  /** いま触れている指（独自の操作で作るタッチ）の位置。0〜2 本 */
+  fingers: { x: number; y: number }[];
+  /** 2 本指のタッチで、アプリが preventDefault した回数（ピンチを止めた回数） */
+  pinchPrevented: number;
 };
 
 /** 知らせてよい（想定どおりの）知らせの書き出し */
@@ -120,6 +124,17 @@ const ui = extract((s) => {
     /** 最後に選んだファイルが、いま表示されている */
     lastFileShown: shown,
     shownSeq: pbt?.shownSeq ?? 0,
+    fingers: pbt?.fingers.length ?? 0,
+    pinchPrevented: pbt?.pinchPrevented ?? 0,
+    /** 描きかけの枠（.rect-drawing）の数 */
+    drawings: d.querySelectorAll('.rect-drawing').length,
+    rectMode: !!q('#btn-rect-mode')?.classList.contains('active'),
+    touchAction: container ? getComputedStyle(container).touchAction : '',
+    /** この状態に至った操作が「選択範囲をクリア」のクリックか */
+    clearedNow: (() => {
+      const a = s.lastAction as { Click?: { fingerprint?: { id?: string | null } } } | null;
+      return !!a && typeof a === 'object' && a.Click?.fingerprint?.id === 'btn-clear';
+    })(),
     /** いま表示している頁で、墨消しを押したときに記録した範囲の中心の色 */
     redactedColors: recorded.map(([fx, fy]) => pixel(fx, fy)),
   };
@@ -133,7 +148,13 @@ const ui = extract((s) => {
  */
 const installShim = registerCustomAction('installShim', async (document, window) => {
   const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
-  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0 };
+  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0 };
+  // 2 本指のタッチで、アプリが preventDefault したかを数える（window の聞き手は、アプリの聞き手の後に走る）
+  for (const type of ['touchstart', 'touchmove']) {
+    w.addEventListener(type, (e) => {
+      if ((e as TouchEvent).touches.length > 1 && e.defaultPrevented) pbt.pinchPrevented++;
+    });
+  }
   let fileSeq = 0;
   w.__pbt = pbt;
   w.alert = (m?: unknown) => {
@@ -279,6 +300,63 @@ const resize = actions(() =>
 
 const waits = actions(() => ['Wait' as const]);
 
+/**
+ * タッチの操作（Bombadil の組み込みにはタッチが無いので、ページの中で TouchEvent を作って送る）。
+ * 指を置く・動かす・2 本目を置く・離す・打ち切られる、を別々の操作にして、指を置いたままの間にほかの操作が割り込む順番も試す。
+ * 位置は canvas の大きさに対する割合
+ */
+const touchAction = registerCustomAction(
+  'touch',
+  async (document, window, kind: string, fx: number, fy: number) => {
+    const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
+    const pbt = w.__pbt;
+    const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement;
+    const cb = canvas.getBoundingClientRect();
+    const at = { x: cb.x + cb.width * fx, y: cb.y + Math.min(cb.height, w.innerHeight - cb.y) * fy };
+    const target = document.elementFromPoint(at.x, at.y) ?? document.body;
+    const toTouch = (p: { x: number; y: number }, i: number) => new w.Touch({ identifier: i, target, clientX: p.x, clientY: p.y });
+    const send = (type: string, touches: { x: number; y: number }[], changed: { x: number; y: number }[]) => {
+      const t = touches.map(toTouch);
+      const c = changed.map((p) => toTouch(p, Math.max(0, touches.length)));
+      target.dispatchEvent(new w.TouchEvent(type, { touches: t, targetTouches: t, changedTouches: c.length ? c : t, bubbles: true, cancelable: true }));
+    };
+    const f = pbt.fingers;
+    if (kind === 'down' && f.length === 0) {
+      pbt.fingers = [at];
+      send('touchstart', pbt.fingers, pbt.fingers);
+    } else if (kind === 'second' && f.length === 1) {
+      pbt.fingers = [f[0], at];
+      send('touchstart', pbt.fingers, [at]);
+    } else if (kind === 'move' && f.length > 0) {
+      pbt.fingers = [at, ...f.slice(1).map((p) => ({ x: p.x + (at.x - f[0].x) / 2, y: p.y + (at.y - f[0].y) / 2 }))];
+      send('touchmove', pbt.fingers, pbt.fingers);
+    } else if (kind === 'up' && f.length > 0) {
+      pbt.fingers = [];
+      send('touchend', [], f);
+    } else if (kind === 'cancel' && f.length > 0) {
+      pbt.fingers = [];
+      send('touchcancel', [], f);
+    } else if (kind === 'tap' && f.length === 0) {
+      send('touchstart', [at], [at]);
+      send('touchend', [], [at]);
+    }
+  },
+);
+const TOUCH_POINTS: [number, number][] = [
+  [0.15, 0.15],
+  [0.4, 0.3],
+  [0.7, 0.5],
+  [0.3, 0.7],
+  [0.85, 0.85],
+];
+const touches = actions(() => {
+  const u = ui.current;
+  if (!u.canvasBox) return [];
+  const at = (kind: string) => TOUCH_POINTS.map(([x, y]) => touchAction(kind, x, y));
+  if (u.fingers === 0) return [...at('down'), ...at('tap')];
+  return [...at('move'), ...(u.fingers === 1 ? at('second') : []), touchAction('up', 0, 0), touchAction('cancel', 0, 0)];
+}).when(ready);
+
 /** 操作はまとめて 1 つだけ export する（export したものは全部登録されるので、個々も export すると二重に数えられる） */
 export const all = weighted([
   [3, openFiles],
@@ -288,6 +366,7 @@ export const all = weighted([
   [6, buttons],
   [1, resize],
   [3, waits],
+  [4, touches],
 ]);
 
 // ---- 性質 ----
@@ -354,6 +433,26 @@ export const shownFileStaysShown = always(() => {
   if (u.shownSeq !== u.lastFile.seq) return true;
   return u.lastFileShown;
 });
+
+/** 描きかけの枠は、1 本指で描いている間に 1 つまで。それ以外は残らない（置き去りの枠や点を残さない） */
+export const noStrayDrawings = always(() => ui.current.drawings <= (ui.current.fingers === 1 ? 1 : 0));
+
+/** 「選択範囲をクリア」を押した直後は、範囲の枠も描きかけの枠も 1 つも無い */
+export const clearLeavesNothing = always(() => {
+  const u = ui.current;
+  if (!u.clearedNow || u.busy) return true;
+  return u.overlayRects.length === 0 && u.drawings === 0;
+});
+
+/** 矩形選択で範囲を選べるときは、ブラウザの拡大・縮小（ピンチ）を止めない */
+export const rectModeAllowsPinch = always(() => {
+  const u = ui.current;
+  if (!u.rectMode || !u.selectable) return true;
+  return u.touchAction === 'pinch-zoom';
+});
+
+/** 2 本指のタッチで、アプリが preventDefault しない（ブラウザがピンチとして扱える） */
+export const pinchIsNotPrevented = always(() => ui.current.pinchPrevented === 0);
 
 /** 想定していない失敗の知らせが出ない */
 export const noUnexpectedAlerts = always(() => ui.current.unexpectedAlerts.length === 0);

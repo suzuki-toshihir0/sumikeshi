@@ -62,6 +62,11 @@ export class SelectionManager {
     this.pageContainerEl.dataset.selectable = String(this.active && this.hasPageContext);
   }
 
+  /** 描きかけの枠を捨てる（「選択範囲をクリア」のとき） */
+  cancelDrawing(): void {
+    this.rectSelection.cancelDrag();
+  }
+
   /** 選択を有効化する */
   enable(): void {
     this.active = true;
