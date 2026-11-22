@@ -226,12 +226,42 @@ class App {
       // (pdfjs-distがWorkerにtransferするとdetachedになるため)
       this.originalBytes = fileBytes.slice(0);
       this.pageNav.show();
-      await this.viewer.load(fileBytes);
+      try {
+        await this.viewer.load(fileBytes);
+      } catch (err) {
+        // 次の文書を開いたなら、そちらが画面を持つ
+        if (revision !== this.docRevision) return;
+        const e = err instanceof Error ? err : new Error(String(err));
+        console.warn('PDF の読み込みエラー:', e.message);
+        // 画面に残る前の文書と、読めなかった PDF のバイト列を結び付けないよう、何も開いていない画面に戻す
+        this.showEmpty();
+        alert(`この PDF を開けませんでした。\n${e.message}`);
+        return;
+      }
       // 読んでいる間に次の文書を開いたか、墨消しが始まっていたら、範囲を選べるようにしない
       // （墨消しが終われば、そちらで選べるようにする）。開けなかったファイルは文書を替えないので、ここでは数えない
       if (revision !== this.docRevision || this.busy) return;
     }
     this.selection.enable();
+  }
+
+  /** 何も開いていない最初の画面に戻す */
+  private showEmpty(): void {
+    this.docRevision++;
+    this.viewer.destroy();
+    this.imageViewer.unload();
+    this.image = null;
+    this.imageRedacted = [];
+    this.originalBytes = null;
+    this.redactedBytes = null;
+    this.store.clear();
+    this.overlay.clear();
+    this.selection.disable();
+    this.toolbar.hideDownload();
+    this.toolbar.hideControls();
+    this.pageNav.hide();
+    this.pageWrapper.hidden = true;
+    this.dropZone.hidden = false;
   }
 
   /** 墨消しの処理中なら、ファイルを開かずに理由を伝えて true を返す */

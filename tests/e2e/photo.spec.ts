@@ -510,6 +510,26 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('.rect-drawing')).toHaveCount(0);
   });
 
+  test('PDF を読めなかったら、理由を伝えて最初の画面に戻す（前の文書の画面に、読めなかった PDF のバイト列を結び付けない）', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await waitForRender(page);
+    const message = page.waitForEvent('dialog').then(async (d) => {
+      const m = d.message();
+      await d.dismiss();
+      return m;
+    });
+    await openFile(page, 'broken.pdf', new TextEncoder().encode('%PDF-1.7\nこれは PDF ではない'), 'application/pdf');
+    expect(await message).toContain('PDF を開けません');
+    await expect(page.locator('#drop-zone')).toBeVisible();
+    await expect(page.locator('#page-wrapper')).toBeHidden();
+    await expect(page.locator('#page-nav')).toBeHidden();
+    // 開き直せる
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await waitForRender(page);
+    await expect(page.locator('#page-info')).toContainText('1 / 2');
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');

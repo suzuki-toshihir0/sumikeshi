@@ -93,6 +93,12 @@ export class Toolbar {
     requestAnimationFrame(() => this.updateSlider());
   }
 
+  /** 何も開いていない最初の画面に戻す（開こうとした PDF を読めなかったとき） */
+  hideControls(): void {
+    this.modeGroups.forEach((el) => { el.hidden = true; });
+    this.actionGroup.hidden = true;
+  }
+
   /** 墨消しの処理中は、もう一度押せないようにする */
   setBusy(busy: boolean): void {
     this.redactBtn.disabled = busy;
