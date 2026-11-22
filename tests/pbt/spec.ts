@@ -19,7 +19,8 @@ export { noUncaughtExceptions, noUnhandledPromiseRejections, noConsoleErrors } f
 type Centers = [number, number][];
 /**
  * 頁ごとの範囲の中心。キーは頁（画像）の色の名前（palette.ts）、rev は開いた文書の番号（#page-container の data-doc-revision）。
- * 墨消しを押したときに、その文書の全頁の分を記録する（枠が見えている頁だけでなく、ほかの頁に付けた範囲も確かめる）
+ * 墨消しを押したときに、その文書の全頁の分を記録する（枠が見えている頁だけでなく、ほかの頁に付けた範囲も確かめる）。
+ * 同じ文書の間は、墨消しのたびに積み重ねる
  */
 type PageRects = { rev: string; pages: Record<string, Centers> };
 /** 最後に選んだファイルの名前、選んだ順の番号、処理中だったため断られたか */
@@ -184,7 +185,11 @@ const installShim = registerCustomAction('installShim', async (document, window)
       if (pbt.pending.rev !== rev()) return;
       // 範囲が無いときは、アプリは知らせを出すだけで前の結果を残すので、前の記録も残す（空で上書きすると、以後の確かめが空回りする）
       if (!Object.values(pbt.pending.pages).some((c) => c.length > 0)) return;
-      pbt.redact = { rev: pbt.pending.rev, pages: { ...pbt.pending.pages } };
+      // 同じ文書の前の墨消しの記録に積み重ねる（2 回目の墨消しで、1 回目に消したものが戻らないことも確かめる）
+      const before = pbt.redact && pbt.redact.rev === pbt.pending.rev ? pbt.redact.pages : {};
+      const pages: Record<string, Centers> = { ...before };
+      for (const [id, c] of Object.entries(pbt.pending.pages)) pages[id] = [...(pages[id] ?? []), ...c];
+      pbt.redact = { rev: pbt.pending.rev, pages };
       // 墨消しが済めばアプリは範囲を消す
       pbt.pending = { rev: rev(), pages: {} };
     },
