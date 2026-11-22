@@ -425,6 +425,39 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('.redaction-rect').first()).toBeVisible();
   });
 
+  test('次の文書を読み込んでいる間は、前の文書の上で範囲を選べない（前の文書の座標の範囲を次の文書に当てない）', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await expect(page.locator('#page-info')).toContainText('1 / 2');
+    await page.locator('#btn-rect-mode').click();
+    // pdf.js の Worker へのやり取りを遅らせ、次の PDF の読み込みを延ばす
+    await page.evaluate(() => {
+      const post = Worker.prototype.postMessage;
+      (window as unknown as { restorePost: () => void }).restorePost = () => {
+        Worker.prototype.postMessage = post;
+      };
+      Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+        setTimeout(() => (post as (...a: unknown[]) => void).apply(this, args), 2000);
+      } as typeof Worker.prototype.postMessage;
+    });
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    // 読み込み中（画面にはまだ前の PDF が出ている）に、範囲を選ぼうとする
+    const box = (await page.locator('#pdf-canvas').boundingBox())!;
+    await page.mouse.move(box.x + 50, box.y + 50);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 200, box.y + 120, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+    // 遅らせるのを止め、読み込みが終われば選べる
+    await page.evaluate(() => (window as unknown as { restorePost: () => void }).restorePost());
+    await page.waitForTimeout(5000);
+    await page.mouse.move(box.x + 50, box.y + 50);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 200, box.y + 120, { steps: 5 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');

@@ -206,6 +206,10 @@ class App {
     this.pageWrapper.hidden = false;
     this.toolbar.showControls();
     this.toolbar.setDocumentKind(kind.kind);
+    // 次の文書を表示し終えるまでは範囲を選ばせない（画面に残る前の文書の上で選んだ範囲を、次の文書に当てない）。
+    // 選び方の切り替え（setDocumentKind）が選択を有効にするので、その後で止める
+    this.selection.disable();
+    this.overlay.clear();
 
     if (image) {
       this.image = image;
