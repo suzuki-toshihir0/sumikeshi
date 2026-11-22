@@ -27,3 +27,15 @@ jobs:
 
       - run: npx playwright install --with-deps
       - run: npm run test:e2e
+
+      # 画面の性質の試験（Bombadil、3 分）。Chrome は、上で Playwright が入れた Chromium を使う
+      - name: 画面の性質の試験（Bombadil）
+        run: CHROME="$(node -e "console.log(require('@playwright/test').chromium.executablePath())")" npm run test:pbt
+
+      # 性質が破れたら、トレース（スクリーンショット入り）を残す。`npx bombadil browser inspect pbt.bin` で見られる
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: bombadil-trace
+          path: test-results/pbt.bin
+          if-no-files-found: ignore
