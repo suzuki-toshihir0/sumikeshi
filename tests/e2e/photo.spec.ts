@@ -673,6 +673,33 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('#drop-zone')).toBeVisible();
   });
 
+  test('読めない PDF の読み込み中に次のファイルを選んだら、PDF の失敗は知らせず、次のファイルを開く', async ({ page }) => {
+    await page.route('**/pdf.worker*', async (route) => {
+      await new Promise((r) => setTimeout(r, 1500));
+      await route.continue();
+    });
+    await page.goto('/');
+    const dialogs: string[] = [];
+    page.on('dialog', async (d) => {
+      dialogs.push(d.message());
+      await d.dismiss();
+    });
+    const png = await makeImage(page, 200, 100, 'image/png');
+    // 次の画像の読み込みを 3 秒遅らせる（PDF の失敗が、画像を開く前に起きるように）
+    await page.evaluate(() => {
+      const original = window.createImageBitmap.bind(window);
+      window.createImageBitmap = ((...args: Parameters<typeof createImageBitmap>) =>
+        new Promise((r) => setTimeout(r, 3000)).then(() => original(...args))) as typeof createImageBitmap;
+    });
+    await openFile(page, 'broken.pdf', new TextEncoder().encode('%PDF-1.7\nこれは PDF ではない'), 'application/pdf');
+    await openFile(page, 'a.png', png, 'image/png');
+    await waitForRender(page);
+    await page.waitForTimeout(1000);
+    expect(dialogs).toEqual([]);
+    await expect(page.locator('#btn-text-mode')).toBeHidden();
+    await expect(page.locator('#page-wrapper')).toBeVisible();
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');

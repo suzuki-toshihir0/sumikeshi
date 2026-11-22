@@ -49,7 +49,8 @@ export class RectSelection {
   }
 
   private handleMouseDown = (e: MouseEvent): void => {
-    // 頁を描き直している間（座標が無い間）は、ドラッグを始めない
+    // 頁を描き直している間（座標が無い間）は、ドラッグを始めない。描き直しをまたぐドラッグも捨てる（setPageContext）。
+    // 描き直しの前の座標しか無いので、捨てないと別の頁や古い表示の位置に範囲が付く（意図した振る舞い）
     if (!this.enabled || !this.viewport || e.button !== 0) return;
     // 既存の墨消し矩形をクリックした場合はドラッグ開始しない
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;

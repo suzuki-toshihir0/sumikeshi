@@ -245,7 +245,8 @@ class App {
         console.warn('PDF の読み込みエラー:', e.message);
         // 画面に残る前の文書と、読めなかった PDF のバイト列を結び付けないよう、何も開いていない画面に戻す
         this.showEmpty();
-        alert(`この PDF を開けませんでした。\n${e.message}`);
+        // 読んでいる間に次のファイルが選ばれていたら、前のファイルのことは知らせない（次のファイルが開くか、そちらで理由を伝える）
+        if (request === this.loadRequest) alert(`この PDF を開けませんでした。\n${e.message}`);
         return;
       }
       // 読んでいる間に次の文書を開いたか、墨消しが始まっていたら、範囲を選べるようにしない
