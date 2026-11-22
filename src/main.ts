@@ -173,7 +173,14 @@ class App {
   private async loadFile(file: File): Promise<void> {
     if (this.refuseWhileBusy()) return;
     const request = ++this.loadRequest;
-    const fileBytes = await readFileAsArrayBuffer(file);
+    let fileBytes: ArrayBuffer;
+    try {
+      fileBytes = await readFileAsArrayBuffer(file);
+    } catch (err) {
+      if (request !== this.loadRequest) return;
+      alert(err instanceof Error ? err.message : String(err));
+      return;
+    }
     // 読んでいる間に次のファイルが選ばれていたら開かない。墨消しが始まっていたら、理由を伝えて開かない
     if (request !== this.loadRequest || this.refuseWhileBusy()) return;
     const kind = detectFileKind(new Uint8Array(fileBytes));
@@ -187,6 +194,8 @@ class App {
       try {
         image = await ImageDocument.decode(new Uint8Array(fileBytes), kind.format);
       } catch (err) {
+        // 読んでいる間に次のファイルが選ばれていたら、前のファイルのことは知らせない
+        if (request !== this.loadRequest) return;
         const e = err instanceof Error ? err : new Error(String(err));
         console.warn('画像の読み込みエラー:', e.message);
         alert(`この画像は開けません。\n${e.message}`);

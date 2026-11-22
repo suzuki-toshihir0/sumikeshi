@@ -625,6 +625,54 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('.rect-drawing')).toHaveCount(0);
   });
 
+  test('前に選んだ画像を読めなくても、後に選んだファイルを開いていれば知らせない', async ({ page }) => {
+    await page.goto('/');
+    const dialogs: string[] = [];
+    page.on('dialog', async (d) => {
+      dialogs.push(d.message());
+      await d.dismiss();
+    });
+    const png = await makeImage(page, 200, 100, 'image/png');
+    // 最初の画像の読み込みを、1.5 秒たってから失敗させる
+    await page.evaluate(() => {
+      const original = window.createImageBitmap.bind(window);
+      let first = true;
+      window.createImageBitmap = ((...args: Parameters<typeof createImageBitmap>) => {
+        if (first) {
+          first = false;
+          return new Promise((_, reject) => setTimeout(() => reject(new Error('壊れた画像')), 1500));
+        }
+        return original(...args);
+      }) as typeof createImageBitmap;
+    });
+    await openFile(page, 'broken.jpg', new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), 'image/jpeg');
+    await openFile(page, 'a.png', png, 'image/png');
+    await waitForRender(page);
+    await page.waitForTimeout(3000);
+    expect(dialogs).toEqual([]);
+    await expect(page.locator('#btn-text-mode')).toBeHidden();
+  });
+
+  test('ファイルを読み取れなかったら、理由を伝える', async ({ page }) => {
+    await page.goto('/');
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.evaluate(() => {
+      FileReader.prototype.readAsArrayBuffer = function (this: FileReader) {
+        setTimeout(() => this.onerror?.(new ProgressEvent('error') as ProgressEvent<FileReader>), 0);
+      };
+    });
+    const message = page.waitForEvent('dialog').then(async (d) => {
+      const m = d.message();
+      await d.dismiss();
+      return m;
+    });
+    await openFile(page, 'a.png', await makeImage(page, 200, 100, 'image/png'), 'image/png');
+    expect(await message).toContain('読み込みに失敗');
+    expect(errors).toEqual([]);
+    await expect(page.locator('#drop-zone')).toBeVisible();
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');
