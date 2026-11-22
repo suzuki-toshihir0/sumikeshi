@@ -2,11 +2,14 @@ import type { PdfRect } from '../utils/coordinates';
 import { RedactionError } from '../redaction/errors';
 import type { ImageFormat, ImageOutput } from './image-format';
 import { outputFor } from './image-format';
-import { blackPixels, checkImageSize, countNotBlack, shrinkBox, toPixelBox, type PixelBox } from './image-paint';
+import { blackPixels, checkImageSize, countNotBlack, lossyCheckBox, meanAbsDiff, toPixelBox, type PixelBox } from './image-paint';
 
-/** JPEG は 8×8（色は 16×16）の塊で圧縮するので、範囲の端の近くは黒が少しにじむ。確かめるのは内側だけにする */
-const JPEG_MARGIN = 16;
+/** JPEG で書き出した範囲の内側で、黒とみなす各色の上限（一辺 16 画素以上の範囲の内側で、測った最大は 11） */
 const JPEG_TOLERANCE = 24;
+/** 書き出した画像の全体を、この大きさ以下に縮めて canvas と比べる */
+const OVERALL_SIDE = 256;
+/** 全体の比べで許す、色ごとの差の平均（JPEG の画質 0.95 で書き出したもの） */
+const OVERALL_TOLERANCE = 6;
 
 /**
  * 写真などの画像を 1 枚、手元の canvas に持つ。
@@ -71,8 +74,8 @@ export class ImageDocument {
   }
 
   /**
-   * 書き出す。書き出したものを読み直し、大きさと、範囲が黒いことを確かめる
-   * （ブラウザが canvas を黙って描けなかったときに、塗れていない画像を渡さないように）
+   * 書き出す。書き出したものを読み直し、大きさと、範囲が黒いことと、全体が canvas と合っていることを確かめる
+   * （ブラウザが canvas を黙って描けなかったときや、指紋の対策で書き出しを乱すときに、塗れていない画像を渡さないように）
    */
   async encode(redactedRects: PdfRect[]): Promise<Uint8Array> {
     const { mime, quality } = this.output;
@@ -83,6 +86,17 @@ export class ImageDocument {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     await this.verify(blob, this.boxesFor(redactedRects));
     return bytes;
+  }
+
+  /** 全体を OVERALL_SIDE 以下に縮めた画素（canvas と書き出した画像を同じやり方で縮める） */
+  private thumbnail(source: CanvasImageSource): Uint8ClampedArray {
+    const k = Math.min(1, OVERALL_SIDE / Math.max(this.width, this.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(this.width * k));
+    c.height = Math.max(1, Math.round(this.height * k));
+    const ctx = c.getContext('2d')!;
+    ctx.drawImage(source, 0, 0, c.width, c.height);
+    return ctx.getImageData(0, 0, c.width, c.height).data;
   }
 
   private boxesFor(rects: PdfRect[]): PixelBox[] {
@@ -97,8 +111,9 @@ export class ImageDocument {
         throw new RedactionError('書き出した画像の大きさが元と合いません。画像を書き出していません。');
       }
       const lossy = this.output.mime === 'image/jpeg';
+      // 1. 範囲ごと。PNG はすべての画素が黒。JPEG は一辺 16 画素以上の範囲の内側（小さな範囲は 2 で確かめる）
       for (const box of boxes) {
-        const b = lossy ? shrinkBox(box, JPEG_MARGIN) : box;
+        const b = lossy ? lossyCheckBox(box) : box;
         if (!b) continue;
         const w = b.x1 - b.x0;
         const h = b.y1 - b.y0;
@@ -110,6 +125,10 @@ export class ImageDocument {
         if (countNotBlack(ctx.getImageData(0, 0, w, h).data, lossy ? JPEG_TOLERANCE : 0) > 0) {
           throw new RedactionError('書き出した画像で、範囲が黒くなっていませんでした。画像を書き出していません。');
         }
+      }
+      // 2. 全体。縮めて canvas と比べ、書き出しそのものが乱れていないことを確かめる（範囲の大きさによらない）
+      if (meanAbsDiff(this.thumbnail(this.canvas), this.thumbnail(bmp)) > OVERALL_TOLERANCE) {
+        throw new RedactionError('書き出した画像が、墨消しした画像と合いませんでした。画像を書き出していません。');
       }
     } finally {
       bmp.close();

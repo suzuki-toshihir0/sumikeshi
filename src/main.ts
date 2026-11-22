@@ -223,6 +223,9 @@ class App {
       this.originalBytes = fileBytes.slice(0);
       this.pageNav.show();
       await this.viewer.load(fileBytes);
+      // 読んでいる間に次のファイルを開いたか、墨消しが始まっていたら、範囲を選べるようにしない
+      // （墨消しが終われば、そちらで選べるようにする）
+      if (request !== this.loadRequest || this.busy) return;
     }
     this.selection.enable();
   }

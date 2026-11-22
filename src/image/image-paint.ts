@@ -45,6 +45,29 @@ export function countNotBlack(data: Uint8ClampedArray, tolerance: number): numbe
   return n;
 }
 
+/**
+ * JPEG で書き出した後に、黒いことを確かめる箱。JPEG は範囲の外の色が内側ににじむので、端から 1/4（最大 16 画素）を除く。
+ * 一辺 16 画素より小さい範囲は、にじみ（真っ赤の背景の 1 画素の範囲で各色 157 まで上がる）で、
+ * 黒と元の暗い画素を見分けられないので null。この大きさは、塗った直後の読み直しと、全体の比べで確かめる
+ */
+export function lossyCheckBox(box: PixelBox): PixelBox | null {
+  const side = Math.min(box.x1 - box.x0, box.y1 - box.y0);
+  if (side < 16) return null;
+  return shrinkBox(box, Math.min(16, Math.floor(side / 4)));
+}
+
+/** 2 つの RGBA の画素の列の、色ごとの差の平均（透明度は見ない）。長さが違えば Infinity */
+export function meanAbsDiff(a: Uint8ClampedArray, b: Uint8ClampedArray): number {
+  if (a.length !== b.length) return Infinity;
+  let sum = 0;
+  let n = 0;
+  for (let i = 0; i < a.length; i += 4) {
+    sum += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+    n += 3;
+  }
+  return n === 0 ? 0 : sum / n;
+}
+
 /** 箱を四方から margin 画素だけ狭める。潰れたら null */
 export function shrinkBox(box: PixelBox, margin: number): PixelBox | null {
   const b = { x0: box.x0 + margin, y0: box.y0 + margin, x1: box.x1 - margin, y1: box.y1 - margin };

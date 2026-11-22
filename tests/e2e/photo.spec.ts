@@ -349,6 +349,62 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('#btn-text-mode')).toBeHidden();
   });
 
+  test('小さな範囲だけでも、書き出した画像が乱れていたら渡さない（指紋の対策で書き出しを乱すブラウザを装う）', async ({ page }) => {
+    await page.goto('/');
+    await openFile(page, 'a.jpg', await makeImage(page, 320, 240, 'image/jpeg'), 'image/jpeg');
+    await waitForRender(page);
+    await dragImageRect(page, 320, { x: 100, y: 100, width: 10, height: 10 });
+    await page.evaluate(() => {
+      const toBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function (this: HTMLCanvasElement, cb: BlobCallback, ...rest: unknown[]) {
+        const c = document.createElement('canvas');
+        c.width = this.width;
+        c.height = this.height;
+        const ctx = c.getContext('2d')!;
+        ctx.drawImage(this, 0, 0);
+        const d = ctx.getImageData(0, 0, c.width, c.height);
+        for (let i = 0; i < d.data.length; i++) if (i % 4 !== 3) d.data[i] = Math.random() * 256;
+        ctx.putImageData(d, 0, 0);
+        toBlob.call(c, cb, ...(rest as [string?, number?]));
+      };
+    });
+    const message = page.waitForEvent('dialog').then(async (d) => {
+      const m = d.message();
+      await d.dismiss();
+      return m;
+    });
+    await page.locator('#btn-redact').click();
+    expect(await message).toContain('書き出せませんでした');
+    await expect(page.locator('#btn-download')).toBeHidden();
+  });
+
+  test('古い PDF の読み込みが画像の墨消しの最中に終わっても、範囲を選べるようにならない', async ({ page }) => {
+    // pdf.js の Worker の読み込みを遅らせ、PDF の読み込みを画像の墨消しの最中まで延ばす
+    await page.route('**/pdf.worker*', async (route) => {
+      await new Promise((r) => setTimeout(r, 2500));
+      await route.continue();
+    });
+    await page.goto('/');
+    const png = await makeImage(page, 320, 240, 'image/png');
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await openFile(page, 'a.png', png, 'image/png');
+    await waitForRender(page);
+    await dragImageRect(page, 320, { x: 10, y: 10, width: 60, height: 30 });
+    // 墨消しの書き出しを 5 秒遅らせる
+    await page.evaluate(() => {
+      const toBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function (this: HTMLCanvasElement, cb: BlobCallback, ...rest: unknown[]) {
+        toBlob.call(this, (b) => setTimeout(() => cb(b), 5000), ...(rest as [string?, number?]));
+      };
+    });
+    await page.locator('#btn-redact').click();
+    // PDF の読み込みが終わるのを待ってから、墨消しの最中に範囲を選ぼうとする
+    await page.waitForTimeout(3000);
+    await expect(page.locator('#btn-download')).toBeHidden();
+    await dragImageRect(page, 320, { x: 150, y: 100, width: 60, height: 30 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { displayCanvasSize, toPixelBox, blackPixels, countNotBlack, shrinkBox, checkImageSize, MAX_IMAGE_SIDE, MAX_IMAGE_AREA } from '../../src/image/image-paint';
+import { displayCanvasSize, lossyCheckBox, meanAbsDiff, toPixelBox, blackPixels, countNotBlack, shrinkBox, checkImageSize, MAX_IMAGE_SIDE, MAX_IMAGE_AREA } from '../../src/image/image-paint';
 import { RedactionError } from '../../src/redaction/errors';
 
 // 画像の範囲は、PDF と同じく左下を原点とし、1 画素を 1 単位とする
@@ -80,5 +80,28 @@ describe('displayCanvasSize: 表示用の canvas の画素数', () => {
 
   it('1 画素より小さくはしない', () => {
     expect(displayCanvasSize(0.2, 0.2, 1)).toEqual({ width: 1, height: 1 });
+  });
+});
+
+describe('lossyCheckBox: JPEG で書き出した後に確かめる箱', () => {
+  it('一辺 16 画素以上なら、端から 1/4（最大 16 画素）を除いた内側', () => {
+    expect(lossyCheckBox({ x0: 0, y0: 0, x1: 16, y1: 20 })).toEqual({ x0: 4, y0: 4, x1: 12, y1: 16 });
+    expect(lossyCheckBox({ x0: 10, y0: 10, x1: 210, y1: 110 })).toEqual({ x0: 26, y0: 26, x1: 194, y1: 94 });
+  });
+
+  it('一辺 16 画素より小さい範囲は、JPEG のにじみで黒と見分けられないので null（全体の比べで確かめる）', () => {
+    expect(lossyCheckBox({ x0: 0, y0: 0, x1: 15, y1: 100 })).toBeNull();
+  });
+});
+
+describe('meanAbsDiff: 2 つの RGBA の画素の列の、色ごとの差の平均', () => {
+  it('同じなら 0、透明度は見ない', () => {
+    const a = new Uint8ClampedArray([10, 20, 30, 255, 0, 0, 0, 0]);
+    expect(meanAbsDiff(a, a)).toBe(0);
+    expect(meanAbsDiff(a, new Uint8ClampedArray([13, 20, 30, 0, 0, 0, 3, 0]))).toBe(1);
+  });
+
+  it('長さが違えば Infinity', () => {
+    expect(meanAbsDiff(new Uint8ClampedArray(4), new Uint8ClampedArray(8))).toBe(Infinity);
   });
 });
