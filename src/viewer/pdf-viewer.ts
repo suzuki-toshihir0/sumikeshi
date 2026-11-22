@@ -14,6 +14,8 @@ export class PdfViewer {
   private _totalPages = 0;
   private _viewport: PageViewport | null = null;
   private scale = 1.5;
+  /** 読み込みの世代。読み込み・描画の途中で次の文書が開かれたら（画像を含む）、古い処理は canvas もコールバックも触らない */
+  private generation = 0;
 
   private canvas: HTMLCanvasElement;
   private textLayerEl: HTMLElement;
@@ -44,15 +46,22 @@ export class PdfViewer {
 
   /** PDFをArrayBufferから読み込む */
   async load(data: ArrayBuffer, initialPage?: number): Promise<void> {
-    this.doc = await pdfjsLib.getDocument({
+    const generation = ++this.generation;
+    const doc = await pdfjsLib.getDocument({
       data,
       cMapUrl: `${import.meta.env.BASE_URL}cmaps/`,
       cMapPacked: true,
     }).promise;
+    if (generation !== this.generation) {
+      doc.destroy();
+      return;
+    }
+    this.doc = doc;
     this._totalPages = this.doc.numPages;
     const page = Math.min(initialPage ?? 1, this._totalPages);
     this._currentPageNumber = page;
     await this.renderPage(page);
+    if (generation !== this.generation) return;
     // 新しい文書を開いたときは先頭から見せる（墨消しの後の描き直しでは位置を保つ）
     if (initialPage === undefined) this.containerEl.scrollTop = 0;
   }
@@ -79,9 +88,12 @@ export class PdfViewer {
     if (!this.doc) return;
     if (pageNum < 1 || pageNum > this._totalPages) return;
 
+    const generation = this.generation;
     const pageChanged = pageNum !== this._currentPageNumber;
     this._currentPageNumber = pageNum;
-    this.currentPage = await this.doc.getPage(pageNum);
+    const currentPage = await this.doc.getPage(pageNum);
+    if (generation !== this.generation) return;
+    this.currentPage = currentPage;
     this.scale = this.calcFitWidthScale(this.currentPage);
     this._viewport = this.currentPage.getViewport({ scale: this.scale });
 
@@ -97,10 +109,13 @@ export class PdfViewer {
       canvasContext: ctx,
       viewport: this._viewport,
     }).promise;
+    if (generation !== this.generation) return;
 
     // テキストレイヤー描画
     const textContent = await this.currentPage.getTextContent();
+    if (generation !== this.generation) return;
     await renderTextLayer(this.textLayerEl, textContent, this._viewport);
+    if (generation !== this.generation) return;
 
     // 頁を移ったときは、その頁の先頭から見せる
     if (pageChanged) this.containerEl.scrollTop = 0;
@@ -116,7 +131,9 @@ export class PdfViewer {
     await this.renderPage(this._currentPageNumber - 1);
   }
 
+  /** 文書を閉じる。読み込み・描画の途中のものも、この後は画面に触らない */
   destroy(): void {
+    this.generation++;
     this.doc?.destroy();
     this.doc = null;
     this.currentPage = null;

@@ -29,6 +29,11 @@ describe('detectFileKind: ファイル名や MIME ではなく中身で形式を
     expect(detectFileKind(ftyp('avif'))).toEqual({ kind: 'image', format: 'avif' });
   });
 
+  it('画像の先頭近くのコメントや文字の欄に %PDF- があっても、画像として読む', () => {
+    expect(detectFileKind(bytes([0xff, 0xd8, 0xff, 0xfe, 0, 9], '%PDF-1.7'))).toEqual({ kind: 'image', format: 'jpeg' });
+    expect(detectFileKind(bytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 'tEXtComment\0%PDF-1.4'))).toEqual({ kind: 'image', format: 'png' });
+  });
+
   it('知らない形式は null（拡張子が .jpg でも中身が違えば開かない）', () => {
     expect(detectFileKind(bytes('GIF89a'))).toBeNull();
     expect(detectFileKind(bytes('hello'))).toBeNull();

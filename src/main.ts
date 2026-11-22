@@ -314,6 +314,9 @@ class App {
     this.selection.disable();
     this.toolbar.setBusy(true);
     const revision = this.docRevision;
+    // 前回の結果は先に落とせなくする（今回の墨消しに失敗したとき、今回の範囲が残った画像を渡さない）
+    this.redactedBytes = null;
+    this.toolbar.hideDownload();
     try {
       const rects = this.store.getRectsForPage(1).slice();
       image.redact(rects);
@@ -321,8 +324,6 @@ class App {
       this.store.clear();
       this.overlay.clear();
       this.imageViewer.render();
-      this.redactedBytes = null;
-      this.toolbar.hideDownload();
       const result = await image.encode(this.imageRedacted);
       if (revision !== this.docRevision) return;
       this.redactedBytes = result;

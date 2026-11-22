@@ -271,16 +271,52 @@ test.describe('写真の墨消し', () => {
     await page.goto('/');
     const big = await makeImage(page, 6000, 4000, 'image/png');
     // 画像を選んだ直後（読み込みの途中）に PDF を選ぶ
-    await Promise.all([
-      openFile(page, 'big.png', big, 'image/png'),
-      page.locator('#file-input').setInputFiles(samplePdf),
-    ]);
+    // setInputFiles は change を送った時点で戻る（読み込みの終わりは待たない）
+    await openFile(page, 'big.png', big, 'image/png');
+    await page.locator('#file-input').setInputFiles(samplePdf);
     await expect(page.locator('#page-info')).toContainText('1 / 2');
     // 画像の読み込みが終わるのを待っても、PDF のまま
     await page.waitForTimeout(3000);
     await expect(page.locator('#page-nav')).toBeVisible();
     await expect(page.locator('#btn-text-mode')).toBeVisible();
     await expect(page.locator('#text-layer span').first()).toBeAttached();
+  });
+
+  test('PDF を読んでいる間に画像を選んだら、後に選んだ画像が残る', async ({ page }) => {
+    await page.goto('/');
+    const png = await makeImage(page, 200, 100, 'image/png');
+    // setInputFiles は change を送った時点で戻る（PDF の読み込みの終わりは待たない）
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await openFile(page, 'a.png', png, 'image/png');
+    await waitForRender(page);
+    // PDF の読み込みと描画が終わるのを待っても、画像のまま
+    await page.waitForTimeout(3000);
+    await expect(page.locator('#page-nav')).toBeHidden();
+    await expect(page.locator('#btn-text-mode')).toBeHidden();
+    await expect(page.locator('#text-layer span')).toHaveCount(0);
+    const box = (await page.locator('#pdf-canvas').boundingBox())!;
+    expect(box.width / box.height).toBeCloseTo(2, 1);
+  });
+
+  test('2 回目の墨消しに失敗したら、前回の結果を落とせない（今回の範囲が残った画像を渡さない）', async ({ page }) => {
+    await page.goto('/');
+    await openFile(page, 'a.png', await makeImage(page, 320, 240, 'image/png'), 'image/png');
+    await waitForRender(page);
+    await dragImageRect(page, 320, { x: 10, y: 10, width: 60, height: 30 });
+    await redactAndDownload(page);
+    // 範囲の画素を置き換えられないブラウザを装う
+    await page.evaluate(() => {
+      CanvasRenderingContext2D.prototype.putImageData = function () {};
+    });
+    await dragImageRect(page, 320, { x: 150, y: 100, width: 60, height: 30 });
+    const message = page.waitForEvent('dialog').then(async (d) => {
+      const m = d.message();
+      await d.dismiss();
+      return m;
+    });
+    await page.locator('#btn-redact').click();
+    expect(await message).toContain('黒く塗れませんでした');
+    await expect(page.locator('#btn-download')).toBeHidden();
   });
 
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {

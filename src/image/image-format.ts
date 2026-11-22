@@ -27,9 +27,6 @@ function startsWith(bytes: Uint8Array, sig: number[]): boolean {
  * ファイル名や MIME は当てにしない（iPhone は JPEG に変えた写真に .heic の名前を残すことがある）。
  */
 export function detectFileKind(bytes: Uint8Array): FileKind | null {
-  // PDF は先頭の 1024 バイトのどこかに %PDF- があればよい（pdf.js も前の余計なバイトを読み飛ばす）
-  const head = ascii(bytes, 0, Math.min(bytes.length, 1024));
-  if (head.includes('%PDF-')) return { kind: 'pdf' };
   if (startsWith(bytes, [0xff, 0xd8, 0xff])) return { kind: 'image', format: 'jpeg' };
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { kind: 'image', format: 'png' };
   if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WEBP') return { kind: 'image', format: 'webp' };
@@ -38,6 +35,10 @@ export function detectFileKind(bytes: Uint8Array): FileKind | null {
     if (HEIC_BRANDS.has(major)) return { kind: 'image', format: 'heic' };
     if (major === 'avif' || major === 'avis') return { kind: 'image', format: 'avif' };
   }
+  // PDF は先頭の 1024 バイトのどこかに %PDF- があればよい（pdf.js も前の余計なバイトを読み飛ばす）。
+  // 画像のコメントや文字の欄に %PDF- が入っていることもあるので、先頭で決まる画像の形式を先に見る
+  const head = ascii(bytes, 0, Math.min(bytes.length, 1024));
+  if (head.includes('%PDF-')) return { kind: 'pdf' };
   return null;
 }
 

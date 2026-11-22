@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toPixelBox, blackPixels, countNotBlack, shrinkBox, checkImageSize, MAX_IMAGE_SIDE, MAX_IMAGE_AREA } from '../../src/image/image-paint';
+import { displayCanvasSize, toPixelBox, blackPixels, countNotBlack, shrinkBox, checkImageSize, MAX_IMAGE_SIDE, MAX_IMAGE_AREA } from '../../src/image/image-paint';
 import { RedactionError } from '../../src/redaction/errors';
 
 // 画像の範囲は、PDF と同じく左下を原点とし、1 画素を 1 単位とする
@@ -57,5 +57,28 @@ describe('checkImageSize: ブラウザの canvas に載らない大きさは止�
     expect(() => checkImageSize(100, MAX_IMAGE_SIDE + 1)).toThrow(RedactionError);
     expect(MAX_IMAGE_SIDE * MAX_IMAGE_SIDE).toBeGreaterThan(MAX_IMAGE_AREA - 1);
     expect(() => checkImageSize(0, 100)).toThrow(RedactionError);
+  });
+});
+
+describe('displayCanvasSize: 表示用の canvas の画素数', () => {
+  it('上限に収まるなら、表示の大きさ×DPR', () => {
+    expect(displayCanvasSize(800, 600, 2)).toEqual({ width: 1600, height: 1200 });
+  });
+
+  it('拡大表示で辺が上限を超えるなら、縦横比を保って上限まで縮める（100×8192 を 2.5 倍）', () => {
+    const s = displayCanvasSize(250, 20480, 1);
+    expect(s.height).toBeLessThanOrEqual(MAX_IMAGE_SIDE);
+    expect(s.width * s.height).toBeLessThanOrEqual(MAX_IMAGE_AREA);
+    expect(s.width / s.height).toBeCloseTo(250 / 20480, 2);
+  });
+
+  it('面積が上限を超えるなら、上限まで縮める', () => {
+    const s = displayCanvasSize(6000, 6000, 3);
+    expect(Math.max(s.width, s.height)).toBeLessThanOrEqual(MAX_IMAGE_SIDE);
+    expect(s.width * s.height).toBeLessThanOrEqual(MAX_IMAGE_AREA);
+  });
+
+  it('1 画素より小さくはしない', () => {
+    expect(displayCanvasSize(0.2, 0.2, 1)).toEqual({ width: 1, height: 1 });
   });
 });

@@ -63,3 +63,14 @@ export function checkImageSize(width: number, height: number): void {
     );
   }
 }
+
+/**
+ * 表示用の canvas の画素数。表示の大きさ×DPR が canvas の上限を超えるとき（小さく細長い画像の拡大表示など）は、
+ * 縦横比を保って上限まで縮める（表示の大きさは CSS で保つ）
+ */
+export function displayCanvasSize(cssWidth: number, cssHeight: number, dpr: number): { width: number; height: number } {
+  const w = cssWidth * dpr;
+  const h = cssHeight * dpr;
+  const k = Math.min(1, MAX_IMAGE_SIDE / w, MAX_IMAGE_SIDE / h, Math.sqrt(MAX_IMAGE_AREA / (w * h)));
+  return { width: Math.max(1, Math.floor(w * k)), height: Math.max(1, Math.floor(h * k)) };
+}

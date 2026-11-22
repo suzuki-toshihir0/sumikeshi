@@ -1,5 +1,6 @@
 import type { ImageDocument } from '../image/image-document';
 import { imageViewport, type PageView } from '../utils/coordinates';
+import { displayCanvasSize } from '../image/image-paint';
 
 /** 画像を 1 枚、画面の幅に合わせて表示する（PDF の頁と同じ形の座標で、範囲を選べるようにする） */
 export class ImageViewer {
@@ -37,9 +38,9 @@ export class ImageViewer {
     const scale = Math.min(Math.max(available, 1) / image.width, 2.5);
     this._viewport = imageViewport(image.width, image.height, scale);
 
-    const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = Math.max(1, Math.round(this._viewport.width * dpr));
-    this.canvas.height = Math.max(1, Math.round(this._viewport.height * dpr));
+    const size = displayCanvasSize(this._viewport.width, this._viewport.height, window.devicePixelRatio || 1);
+    this.canvas.width = size.width;
+    this.canvas.height = size.height;
     this.canvas.style.width = `${this._viewport.width}px`;
     this.canvas.style.height = `${this._viewport.height}px`;
     const ctx = this.canvas.getContext('2d')!;
