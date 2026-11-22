@@ -190,15 +190,15 @@ test.describe('モバイル対応', () => {
     }
 
     /**
-     * 触れている指のうち、finger だけを離す（ほかの指は触れたまま）。
+     * 2 本の指のうち、後から置いた指（finger）だけを離す。
      * この版の Chromium は touchEnd に渡した指を離すが、CDP の説明（touchEnd には指を渡さない）と食い違い、版によって変わりうる。
-     * 意図した指が離れたことを、ページが受け取った touchend で確かめる（変わったら、黙って別の筋書きを試さずに落ちる）
+     * 後から置いた指が離れたことを、ページが受け取った touchstart と touchend の識別子で確かめる
+     * （変わったら、黙って別の筋書きを試さずに落ちる。位置で比べないのは、ピンチで拡大すると画面上の位置がずれるため）
      */
-    async function releaseOnly(page: Page, finger: P, all: P[]) {
-      await page.evaluate(() => ((window as unknown as { lastTouchEnd: string }).lastTouchEnd = ''));
-      await touch(page, 'touchEnd', [finger].map((f) => ({ ...f })), all.indexOf(finger));
-      const released = await page.evaluate(() => (window as unknown as { lastTouchEnd: string }).lastTouchEnd);
-      expect(released).toBe(`${Math.round(finger.x)},${Math.round(finger.y)} remaining=${all.length - 1}`);
+    async function releaseSecond(page: Page, finger: P) {
+      await touch(page, 'touchEnd', [finger], 1);
+      const { started, ended } = await page.evaluate(() => (window as unknown as { touchIds: { started: number[]; ended: string } }).touchIds);
+      expect(ended).toBe(`${started[started.length - 1]} remaining=1`);
     }
 
     async function openInRectMode(page: Page) {
@@ -207,18 +207,18 @@ test.describe('モバイル対応', () => {
       await expect(page.locator('#page-info')).toContainText('1 / 2');
       await page.locator('#btn-rect-mode').tap();
       await page.locator('#page-container[data-selectable="true"]').waitFor({ state: 'attached' });
-      // 最後に受け取った touchend（離れた指の位置と、残った指の数）を記録する
-      await page.evaluate(() =>
-        window.addEventListener('touchend', (e) => {
-          const c = e.changedTouches[0];
-          (window as unknown as { lastTouchEnd: string }).lastTouchEnd = `${Math.round(c.clientX)},${Math.round(c.clientY)} remaining=${e.touches.length}`;
-        }),
-      );
+      // 触れ始めた指の識別子と、最後に離れた指の識別子（と残った指の数）を記録する
+      await page.evaluate(() => {
+        const ids = { started: [] as number[], ended: '' };
+        (window as unknown as { touchIds: typeof ids }).touchIds = ids;
+        window.addEventListener('touchstart', (e) => ids.started.push(e.changedTouches[0].identifier));
+        window.addEventListener('touchend', (e) => (ids.ended = `${e.changedTouches[0].identifier} remaining=${e.touches.length}`));
+      });
       return (await page.locator('#page-container').boundingBox())!;
     }
 
-    // 本物のピンチ（ブラウザの拡大）は、画面を出さない Chromium ではタッチの操作で起こせない（何も開いていない画面でも倍率が変わらない）。
-    // ここでは、アプリがピンチを止めていないことを確かめる。拡大そのものは iPhone で確かめる
+    // アプリがピンチを止めていないこと（touch-action と、タッチで preventDefault する場面）を確かめる。
+    // 拡大そのものは、次の試験で、2 本の指を広げて画面の倍率が上がることで確かめる
     test('矩形選択でも、二本指の操作（ピンチ）を止めない。1 本指のドラッグは止めて範囲にする', async ({ page }) => {
       const box = await openInRectMode(page);
       expect(await page.evaluate(() => getComputedStyle(document.getElementById('page-container')!).touchAction)).toBe('pinch-zoom');
@@ -243,9 +243,27 @@ test.describe('モバイル対応', () => {
       await touch(page, 'touchEnd', []);
       const log = await page.evaluate(() => (window as unknown as { touchLog: string[] }).touchLog);
       expect(log.filter((l) => l.split(':')[1] === '2')).toEqual(['touchstart:2:false', 'touchmove:2:false']);
-      expect(log.slice(-2)).toEqual(['touchstart:1:true', 'touchmove:1:true']);
+      // 1 本目の指が触れた時点（touchstart）では止めない。止めると iOS は、そのあと 2 本目の指が来てもピンチを受け付けない
+      // （指が同時に触れたときだけピンチになり、1 本目が先だと効かない）。1 本指で動かすとき（touchmove）は止める（スクロールを防ぐ）
+      expect(log.slice(-2)).toEqual(['touchstart:1:false', 'touchmove:1:true']);
       // 2 本指の操作は範囲にならず、1 本指のドラッグだけが範囲になる
       expect(await page.locator('.redaction-rect').count()).toBe(1);
+      expect(await page.locator('.rect-drawing').count()).toBe(0);
+    });
+
+    test('1 本目の指が先に触れてから 2 本目の指で広げても、拡大される（iPhone で「できたりできなかったり」した件）', async ({ page }) => {
+      const box = await openInRectMode(page);
+      const c = { x: box.x + 180, y: box.y + 250 };
+      // 1 本目が先に触れ、少し後に 2 本目が触れて、広げる
+      await touch(page, 'touchStart', [{ x: c.x - 20, y: c.y - 20 }]);
+      await page.waitForTimeout(50);
+      await touch(page, 'touchStart', [{ x: c.x - 20, y: c.y - 20 }, { x: c.x + 20, y: c.y + 20 }]);
+      for (let i = 1; i <= 10; i++) {
+        await touch(page, 'touchMove', [{ x: c.x - 20 - i * 8, y: c.y - 20 - i * 8 }, { x: c.x + 20 + i * 8, y: c.y + 20 + i * 8 }]);
+      }
+      await touch(page, 'touchEnd', []);
+      await expect.poll(() => page.evaluate(() => window.visualViewport!.scale)).toBeGreaterThan(1.5);
+      expect(await page.locator('.redaction-rect').count()).toBe(0);
       expect(await page.locator('.rect-drawing').count()).toBe(0);
     });
 
@@ -259,7 +277,7 @@ test.describe('モバイル対応', () => {
       const moved = [{ x: a.x + 30, y: a.y + 20 }, { x: a.x + 140, y: a.y + 110 }];
       await touch(page, 'touchMove', moved);
       // 2 本目を先に離し、そのあと 1 本目を離す
-      await releaseOnly(page, moved[1], moved);
+      await releaseSecond(page, moved[1]);
       await touch(page, 'touchEnd', []);
       expect(await page.locator('.rect-drawing').count()).toBe(0);
       expect(await page.locator('.redaction-rect').count()).toBe(0);
@@ -276,7 +294,7 @@ test.describe('モバイル対応', () => {
       await touch(page, 'touchMove', [a2]);
       await touch(page, 'touchStart', [a2, outside]);
       // 2 本目（ページの外）を先に離し、そのあと 1 本目を離す
-      await releaseOnly(page, outside, [a2, outside]);
+      await releaseSecond(page, outside);
       await touch(page, 'touchEnd', []);
       expect(await page.locator('.redaction-rect').count()).toBe(0);
       expect(await page.locator('.rect-drawing').count()).toBe(0);

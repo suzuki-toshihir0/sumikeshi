@@ -147,8 +147,9 @@ export class RectSelection {
     this.drawingEl.style.width = '0px';
     this.drawingEl.style.height = '0px';
     this.overlayEl.appendChild(this.drawingEl);
-
-    e.preventDefault();
+    // ここでは preventDefault しない。1 本目の指の touchstart を止めると、iOS はそのあと 2 本目の指が来ても
+    // ピンチを受け付けない（指が同時に触れたときだけピンチになる）。1 本指のスクロールは touch-action: pinch-zoom と
+    // touchmove の preventDefault で防ぐ
   };
 
   /** どこかで 2 本目の指が触れたら、描きかけの枠を捨てる（ピンチとしてブラウザに任せる） */

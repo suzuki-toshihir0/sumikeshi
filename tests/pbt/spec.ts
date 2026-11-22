@@ -44,6 +44,8 @@ type Pbt = {
   endedMulti: boolean;
   /** 2 本指のタッチで、アプリが preventDefault した回数（ピンチを止めた回数） */
   pinchPrevented: number;
+  /** 指が触れた時点（touchstart）で、アプリが preventDefault した回数（1 本目でも止めると、iOS はそのあとのピンチを受け付けない） */
+  touchstartPrevented: number;
 };
 
 /** 知らせてよい（想定どおりの）知らせの書き出し */
@@ -132,6 +134,7 @@ const ui = extract((s) => {
     shownSeq: pbt?.shownSeq ?? 0,
     fingers: pbt?.fingers.length ?? 0,
     pinchPrevented: pbt?.pinchPrevented ?? 0,
+    touchstartPrevented: pbt?.touchstartPrevented ?? 0,
     multiTouchRects: pbt?.multiTouchRects ?? 0,
     /** 描きかけの枠（.rect-drawing）の数 */
     drawings: d.querySelectorAll('.rect-drawing').length,
@@ -155,11 +158,12 @@ const ui = extract((s) => {
  */
 const installShim = registerCustomAction('installShim', async (document, window) => {
   const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
-  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, multiTouch: false, multiTouchRects: 0, endedMulti: false };
+  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, touchstartPrevented: 0, multiTouch: false, multiTouchRects: 0, endedMulti: false };
   // 2 本指のタッチで、アプリが preventDefault したかを数える（window の聞き手は、アプリの聞き手の後に走る）
   for (const type of ['touchstart', 'touchmove']) {
     w.addEventListener(type, (e) => {
       if ((e as TouchEvent).touches.length > 1 && e.defaultPrevented) pbt.pinchPrevented++;
+      if (type === 'touchstart' && e.defaultPrevented) pbt.touchstartPrevented++;
     });
   }
   let fileSeq = 0;
@@ -496,6 +500,12 @@ export const rectModeAllowsPinch = always(() => {
 
 /** 2 本目の指が触れた操作（ピンチ）では、範囲を作らない（2 本目の指がページの外でも、先に離しても） */
 export const multiTouchMakesNoRect = always(() => ui.current.multiTouchRects === 0);
+
+/**
+ * 指が触れた時点（touchstart）では、指が何本でもアプリが preventDefault しない。
+ * 1 本目の指の touchstart を止めると、iOS の Safari（と Chromium）は、そのあと 2 本目の指が来てもピンチを受け付けない
+ */
+export const touchStartIsNotPrevented = always(() => ui.current.touchstartPrevented === 0);
 
 /** 2 本指のタッチで、アプリが preventDefault しない（ブラウザがピンチとして扱える） */
 export const pinchIsNotPrevented = always(() => ui.current.pinchPrevented === 0);
