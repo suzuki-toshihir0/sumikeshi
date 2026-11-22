@@ -23,8 +23,8 @@ type Centers = [number, number][];
  * 同じ文書の間は、墨消しのたびに積み重ねる
  */
 type PageRects = { rev: string; pages: Record<string, Centers> };
-/** 最後に選んだファイルの名前、選んだ順の番号、処理中だったため断られたか */
-type LastFile = { name: string; seq: number; refused: boolean };
+/** 最後に選んだファイルの名前、選んだ順の番号、選んだときの開いた文書の番号、処理中だったため断られたか */
+type LastFile = { name: string; seq: number; revAtChoice: number; refused: boolean };
 type Pbt = {
   alerts: string[];
   /** 墨消しを押したときの記録 */
@@ -83,7 +83,10 @@ const ui = extract((s) => {
   // 最後に選んだファイルが、範囲を選べる状態で表示されたら、ページの側に印を付ける（後の状態の性質で使う）
   const lastFile = pbt?.lastFile ?? null;
   const prefix = lastFile ? SHOWN_AS[lastFile.name] : undefined;
-  const shown = !!lastFile && !!prefix && selectable && visible && (identify(corner) ?? '').startsWith(prefix);
+  // 選んだ後に新しい文書が開かれている（文書の番号が進んだ）ことも条件にする。同じファイルを選び直したとき、
+  // 前に開いた同じファイルの表示を「表示された」と取り違えないように
+  const shown =
+    !!lastFile && !!prefix && selectable && visible && Number(docRevision) > lastFile.revAtChoice && (identify(corner) ?? '').startsWith(prefix);
   if (pbt && lastFile && shown) pbt.shownSeq = lastFile.seq;
   return {
     shim: !!pbt,
@@ -143,7 +146,7 @@ const installShim = registerCustomAction('installShim', async (document, window)
     'change',
     (e) => {
       const f = (e.target as HTMLInputElement).files?.[0];
-      if (f) pbt.lastFile = { name: f.name, seq: ++fileSeq, refused: false };
+      if (f) pbt.lastFile = { name: f.name, seq: ++fileSeq, revAtChoice: Number(container.dataset.docRevision ?? 0), refused: false };
     },
     true,
   );
