@@ -147,6 +147,8 @@ const installShim = registerCustomAction('installShim', async (document, window)
         const r = e.getBoundingClientRect();
         return [(r.x + r.width / 2 - cb.x) / cb.width, (r.y + r.height / 2 - cb.y) / cb.height] as [number, number];
       });
+      // 範囲が無いときは、アプリは知らせを出すだけで前の結果を残すので、前の記録も残す（空で上書きすると、以後の確かめが空回りする）
+      if (centers.length === 0) return;
       pbt.seq++;
       pbt.redact = { seq: pbt.seq, identity: JSON.stringify(corner), centers };
     },
