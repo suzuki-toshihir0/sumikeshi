@@ -170,13 +170,11 @@ class App {
   }
 
   private async loadFile(file: File): Promise<void> {
-    if (this.busy) {
-      alert('墨消しの処理中は、ほかのファイルを開けません。処理が終わってから開いてください。');
-      return;
-    }
+    if (this.refuseWhileBusy()) return;
     const request = ++this.loadRequest;
     const fileBytes = await readFileAsArrayBuffer(file);
-    if (request !== this.loadRequest) return;
+    // 読んでいる間に次のファイルが選ばれていたら開かない。墨消しが始まっていたら、理由を伝えて開かない
+    if (request !== this.loadRequest || this.refuseWhileBusy()) return;
     const kind = detectFileKind(new Uint8Array(fileBytes));
     if (!kind) {
       alert('開けるのは PDF と画像（JPEG・PNG・WebP・AVIF、Safari では HEIC も）です。');
@@ -193,8 +191,7 @@ class App {
         alert(`この画像は開けません。\n${e.message}`);
         return;
       }
-      // 読んでいる間に次のファイルが選ばれたか、墨消しが始まっていたら、開かない
-      if (request !== this.loadRequest || this.busy) return;
+      if (request !== this.loadRequest || this.refuseWhileBusy()) return;
     }
 
     this.docRevision++;
@@ -228,6 +225,13 @@ class App {
       await this.viewer.load(fileBytes);
     }
     this.selection.enable();
+  }
+
+  /** 墨消しの処理中なら、ファイルを開かずに理由を伝えて true を返す */
+  private refuseWhileBusy(): boolean {
+    if (!this.busy) return false;
+    alert('墨消しの処理中は、ほかのファイルを開けません。処理が終わってから開いてください。');
+    return true;
   }
 
   private refreshOverlay(): void {

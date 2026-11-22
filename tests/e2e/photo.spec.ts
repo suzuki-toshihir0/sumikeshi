@@ -319,6 +319,36 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('#btn-download')).toBeHidden();
   });
 
+  test('ファイルを読んでいる間に墨消しが始まったら、そのファイルは開かずに理由を伝える', async ({ page }) => {
+    await page.goto('/');
+    await openFile(page, 'a.png', await makeImage(page, 320, 240, 'image/png'), 'image/png');
+    await waitForRender(page);
+    await dragImageRect(page, 320, { x: 10, y: 10, width: 60, height: 30 });
+    // ファイルの読み込みを 1.5 秒、墨消しの書き出しを 3 秒遅らせる（読み込みの途中で墨消しが始まり、その最中に読み終わる）
+    await page.evaluate(() => {
+      const read = FileReader.prototype.readAsArrayBuffer;
+      FileReader.prototype.readAsArrayBuffer = function (this: FileReader, blob: Blob) {
+        setTimeout(() => read.call(this, blob), 1500);
+      };
+      const toBlob = HTMLCanvasElement.prototype.toBlob;
+      HTMLCanvasElement.prototype.toBlob = function (this: HTMLCanvasElement, cb: BlobCallback, ...rest: unknown[]) {
+        toBlob.call(this, (b) => setTimeout(() => cb(b), 3000), ...(rest as [string?, number?]));
+      };
+    });
+    const message = page.waitForEvent('dialog').then(async (d) => {
+      const m = d.message();
+      await d.dismiss();
+      return m;
+    });
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await page.locator('#btn-redact').click();
+    expect(await message).toContain('処理中');
+    // 墨消しは最後まで進み、画像のまま
+    await expect(page.locator('#btn-download')).toBeVisible({ timeout: 10000 });
+    await expect(page.locator('#page-nav')).toBeHidden();
+    await expect(page.locator('#btn-text-mode')).toBeHidden();
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');
