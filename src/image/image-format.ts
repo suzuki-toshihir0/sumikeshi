@@ -23,6 +23,22 @@ function startsWith(bytes: Uint8Array, sig: number[]): boolean {
 }
 
 /**
+ * HEIF の箱（ftyp）の銘柄から、HEIC か AVIF かを決める。主の銘柄が汎用の mif1・msf1 のファイルもあるので、
+ * 主の銘柄、互換の銘柄の順に見る（互換の銘柄は箱の大きさの中だけ）
+ */
+function heifFormat(bytes: Uint8Array): 'heic' | 'avif' | null {
+  const size = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0);
+  const end = Math.min(size === 0 ? bytes.length : size, bytes.length);
+  const brands = [ascii(bytes, 8, 4)];
+  for (let o = 16; o + 4 <= end; o += 4) brands.push(ascii(bytes, o, 4));
+  for (const brand of brands) {
+    if (HEIC_BRANDS.has(brand)) return 'heic';
+    if (brand === 'avif' || brand === 'avis') return 'avif';
+  }
+  return null;
+}
+
+/**
  * ファイルの形式を中身の先頭のバイトで決める。
  * ファイル名や MIME は当てにしない（iPhone は JPEG に変えた写真に .heic の名前を残すことがある）。
  */
@@ -31,9 +47,8 @@ export function detectFileKind(bytes: Uint8Array): FileKind | null {
   if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return { kind: 'image', format: 'png' };
   if (ascii(bytes, 0, 4) === 'RIFF' && ascii(bytes, 8, 4) === 'WEBP') return { kind: 'image', format: 'webp' };
   if (ascii(bytes, 4, 4) === 'ftyp') {
-    const major = ascii(bytes, 8, 4);
-    if (HEIC_BRANDS.has(major)) return { kind: 'image', format: 'heic' };
-    if (major === 'avif' || major === 'avis') return { kind: 'image', format: 'avif' };
+    const format = heifFormat(bytes);
+    if (format) return { kind: 'image', format };
   }
   // PDF は先頭の 1024 バイトのどこかに %PDF- があればよい（pdf.js も前の余計なバイトを読み飛ばす）。
   // 画像のコメントや文字の欄に %PDF- が入っていることもあるので、先頭で決まる画像の形式を先に見る

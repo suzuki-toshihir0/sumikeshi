@@ -102,6 +102,7 @@ PDF の墨消しとは別の道で、Worker も pdf-lib も使わない。範囲
 
 ### E2Eテストの注意事項
 
+- **範囲を選べるようになるのを待つ**: 範囲を選べるのは、文書の読み込みと描画（文字のレイヤーまで）が終わってから。墨消しの処理中と、次の文書の読み込み中は、選び方を切り替えても選べない（`SelectionManager` の `active`）。選べるかは `#page-container` の `data-selectable` に出しているので、試験は `waitForRender` でこれを待ってから範囲を選ぶ。
 - **モバイルE2Eはprojects分離**: `playwright.config.ts` の `projects` でdesktop/mobileを振り分け。モバイルは `devices['iPhone 14']` + Chromium（CDPセッション利用のため）。
 - **タッチドラッグ**: Playwrightの `page.touchscreen` は `tap()` のみ提供。ドラッグはCDP `Input.dispatchTouchEvent` で `touchStart` → `touchMove`（複数ステップ）→ `touchEnd` を送る。
 - **テキスト選択モードのモバイルE2Eは未実装**: テキスト選択モード（`text-selection.ts`）はモバイルで `selectionchange` イベントのデバウンス（500ms）経由で動作するが、E2Eテストが困難なため意図的にスキップしている。理由: モバイルのテキスト選択はOS/ブラウザのネイティブlong-press動作に依存しており、Playwrightにはlong-press APIがない。CDPで `touchStart` を長時間保持してもChromiumがネイティブテキスト選択として認識する保証がなく、テストが不安定になる。

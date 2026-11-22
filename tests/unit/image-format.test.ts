@@ -10,6 +10,9 @@ const bytes = (...parts: (number[] | string)[]) => {
   return new Uint8Array(out);
 };
 const ftyp = (brand: string) => bytes([0, 0, 0, 0x18], 'ftyp', brand, [0, 0, 0, 0], 'mif1', brand);
+/** 主の銘柄と互換の銘柄を並べた ftyp の箱 */
+const ftypWith = (major: string, ...compatible: string[]) =>
+  bytes([0, 0, 0, 16 + compatible.length * 4], 'ftyp', major, [0, 0, 0, 0], ...compatible);
 
 describe('detectFileKind: ファイル名や MIME ではなく中身で形式を決める', () => {
   it('PDF（先頭の %PDF-。前に余計なバイトがあっても読む）', () => {
@@ -27,6 +30,17 @@ describe('detectFileKind: ファイル名や MIME ではなく中身で形式を
     expect(detectFileKind(ftyp('heic'))).toEqual({ kind: 'image', format: 'heic' });
     expect(detectFileKind(ftyp('heix'))).toEqual({ kind: 'image', format: 'heic' });
     expect(detectFileKind(ftyp('avif'))).toEqual({ kind: 'image', format: 'avif' });
+  });
+
+  it('主の銘柄が mif1・msf1 でも、互換の銘柄に heic・avif があれば読む', () => {
+    expect(detectFileKind(ftypWith('mif1', 'mif1', 'heic'))).toEqual({ kind: 'image', format: 'heic' });
+    expect(detectFileKind(ftypWith('msf1', 'msf1', 'hevc'))).toEqual({ kind: 'image', format: 'heic' });
+    expect(detectFileKind(ftypWith('mif1', 'mif1', 'miaf', 'avif'))).toEqual({ kind: 'image', format: 'avif' });
+  });
+
+  it('互換の銘柄が箱の外にはみ出していたら見ない', () => {
+    // 箱の大きさは 16（互換の銘柄なし）。後ろに続く 'heic' は次の箱のもの
+    expect(detectFileKind(bytes([0, 0, 0, 16], 'ftyp', 'mif1', [0, 0, 0, 0], 'heic'))).toBeNull();
   });
 
   it('画像の先頭近くのコメントや文字の欄に %PDF- があっても、画像として読む', () => {

@@ -68,6 +68,8 @@ async function waitForRender(page: Page) {
     const c = document.querySelector('#pdf-canvas') as HTMLCanvasElement | null;
     return !!c && c.getBoundingClientRect().width > 0 && c.width !== 300;
   });
+  // 読み込みと描画が終わり、範囲を選べるようになるまで待つ
+  await page.locator('#page-container[data-selectable="true"]').waitFor({ state: 'attached' });
 }
 
 /**
@@ -455,6 +457,38 @@ test.describe('写真の墨消し', () => {
     await page.mouse.down();
     await page.mouse.move(box.x + 200, box.y + 120, { steps: 5 });
     await page.mouse.up();
+    await expect(page.locator('.redaction-rect')).toHaveCount(1);
+  });
+
+  test('次の文書を読み込んでいる間に選び方を切り替えても、範囲を選べるようにならない', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await expect(page.locator('#page-info')).toContainText('1 / 2');
+    await page.evaluate(() => {
+      const post = Worker.prototype.postMessage;
+      (window as unknown as { restorePost: () => void }).restorePost = () => {
+        Worker.prototype.postMessage = post;
+      };
+      Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+        setTimeout(() => (post as (...a: unknown[]) => void).apply(this, args), 2000);
+      } as typeof Worker.prototype.postMessage;
+    });
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await page.locator('#btn-rect-mode').click();
+    await expect(page.locator('#btn-rect-mode')).toHaveClass(/active/);
+    const box = (await page.locator('#pdf-canvas').boundingBox())!;
+    const drag = async () => {
+      await page.mouse.move(box.x + 50, box.y + 50);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 200, box.y + 120, { steps: 5 });
+      await page.mouse.up();
+    };
+    await drag();
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+    // 読み込みが終われば、切り替えた選び方（矩形）で選べる
+    await page.evaluate(() => (window as unknown as { restorePost: () => void }).restorePost());
+    await page.waitForTimeout(5000);
+    await drag();
     await expect(page.locator('.redaction-rect')).toHaveCount(1);
   });
 

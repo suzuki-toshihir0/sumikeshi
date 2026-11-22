@@ -8,7 +8,10 @@ export class SelectionManager {
   private textSelection: TextSelection;
   private rectSelection: RectSelection;
   private _mode: SelectionMode = 'text';
+  /** 範囲を選ばせてよいか。止めている間（墨消しの処理中、次の文書の読み込み中）は、選び方を切り替えても有効にしない */
+  private active = false;
   private textLayerEl: HTMLElement;
+  private pageContainerEl: HTMLElement;
 
   constructor(
     textLayerEl: HTMLElement,
@@ -17,6 +20,7 @@ export class SelectionManager {
     store: RedactionStore,
   ) {
     this.textLayerEl = textLayerEl;
+    this.pageContainerEl = pageContainerEl;
     this.textSelection = new TextSelection(textLayerEl, store);
     this.rectSelection = new RectSelection(overlayEl, pageContainerEl, store);
   }
@@ -27,8 +31,8 @@ export class SelectionManager {
 
   setMode(mode: SelectionMode): void {
     this._mode = mode;
-    this.textSelection.setEnabled(mode === 'text');
-    this.rectSelection.setEnabled(mode === 'rect');
+    this.textSelection.setEnabled(this.active && mode === 'text');
+    this.rectSelection.setEnabled(this.active && mode === 'rect');
     this.textLayerEl.classList.toggle('selecting-text', mode === 'text');
   }
 
@@ -40,11 +44,16 @@ export class SelectionManager {
 
   /** 選択を有効化する */
   enable(): void {
+    this.active = true;
+    // 範囲を選べるかを外から見えるようにする（E2E は、これを待ってから範囲を選ぶ）
+    this.pageContainerEl.dataset.selectable = 'true';
     this.setMode(this._mode);
   }
 
   /** 選択を無効化する */
   disable(): void {
+    this.active = false;
+    this.pageContainerEl.dataset.selectable = 'false';
     this.textSelection.setEnabled(false);
     this.rectSelection.setEnabled(false);
   }

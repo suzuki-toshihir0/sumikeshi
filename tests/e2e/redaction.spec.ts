@@ -38,6 +38,8 @@ async function waitForRender(page: Page) {
     const c = document.querySelector('#pdf-canvas') as HTMLCanvasElement | null;
     return !!c && c.getBoundingClientRect().width > 300;
   });
+  // 読み込みと描画が終わり、範囲を選べるようになるまで待つ
+  await page.locator('#page-container[data-selectable="true"]').waitFor({ state: 'attached' });
 }
 
 function collectErrors(page: Page): string[] {
