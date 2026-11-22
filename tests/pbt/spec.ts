@@ -34,6 +34,16 @@ type Pbt = {
   lastFile: LastFile | null;
   /** 範囲を選べる状態で表示されたことのある、最後に選んだファイルの番号 */
   shownSeq: number;
+  /** いま触れている指（独自の操作で作るタッチ）の位置と、触れ始めた要素。0〜2 本 */
+  fingers: { x: number; y: number; id: number; target: Element }[];
+  /** いまの指の操作（最初の指を置いてから全部離すまで）で、2 本目の指が触れたか */
+  multiTouch: boolean;
+  /** 2 本指になった操作で、範囲ができた回数 */
+  multiTouchRects: number;
+  /** この操作で全部の指を離した（打ち切られた）のが、2 本指になった操作だったか */
+  endedMulti: boolean;
+  /** 2 本指のタッチで、アプリが preventDefault した回数（ピンチを止めた回数） */
+  pinchPrevented: number;
 };
 
 /** 知らせてよい（想定どおりの）知らせの書き出し */
@@ -120,6 +130,18 @@ const ui = extract((s) => {
     /** 最後に選んだファイルが、いま表示されている */
     lastFileShown: shown,
     shownSeq: pbt?.shownSeq ?? 0,
+    fingers: pbt?.fingers.length ?? 0,
+    pinchPrevented: pbt?.pinchPrevented ?? 0,
+    multiTouchRects: pbt?.multiTouchRects ?? 0,
+    /** 描きかけの枠（.rect-drawing）の数 */
+    drawings: d.querySelectorAll('.rect-drawing').length,
+    rectMode: !!q('#btn-rect-mode')?.classList.contains('active'),
+    touchAction: container ? getComputedStyle(container).touchAction : '',
+    /** この状態に至った操作が「選択範囲をクリア」のクリックか */
+    clearedNow: (() => {
+      const a = s.lastAction as { Click?: { fingerprint?: { id?: string | null } } } | null;
+      return !!a && typeof a === 'object' && a.Click?.fingerprint?.id === 'btn-clear';
+    })(),
     /** いま表示している頁で、墨消しを押したときに記録した範囲の中心の色 */
     redactedColors: recorded.map(([fx, fy]) => pixel(fx, fy)),
   };
@@ -133,7 +155,13 @@ const ui = extract((s) => {
  */
 const installShim = registerCustomAction('installShim', async (document, window) => {
   const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
-  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0 };
+  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, multiTouch: false, multiTouchRects: 0, endedMulti: false };
+  // 2 本指のタッチで、アプリが preventDefault したかを数える（window の聞き手は、アプリの聞き手の後に走る）
+  for (const type of ['touchstart', 'touchmove']) {
+    w.addEventListener(type, (e) => {
+      if ((e as TouchEvent).touches.length > 1 && e.defaultPrevented) pbt.pinchPrevented++;
+    });
+  }
   let fileSeq = 0;
   w.__pbt = pbt;
   w.alert = (m?: unknown) => {
@@ -279,6 +307,99 @@ const resize = actions(() =>
 
 const waits = actions(() => ['Wait' as const]);
 
+/**
+ * タッチの操作（Bombadil の組み込みにはタッチが無いので、ページの中で TouchEvent を作って送る）。
+ * 指を置く・動かす・2 本目を置く・離す・打ち切られる、を別々の操作にして、指を置いたままの間にほかの操作が割り込む順番も試す。
+ * 位置は canvas の大きさに対する割合
+ */
+const touchAction = registerCustomAction(
+  'touch',
+  async (document, window, kind: string, fx: number, fy: number) => {
+    const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
+    const pbt = w.__pbt;
+    const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement;
+    const cb = canvas.getBoundingClientRect();
+    // 2 本目の指をページの外に置くときは、ツールバーの右端
+    const toolbar = document.getElementById('toolbar')!.getBoundingClientRect();
+    const at =
+      kind === 'secondOutside'
+        ? { x: toolbar.right - 8, y: toolbar.top + toolbar.height / 2 }
+        : { x: cb.x + cb.width * fx, y: cb.y + Math.min(cb.height, w.innerHeight - cb.y) * fy };
+    type Finger = Pbt['fingers'][number];
+    const toTouch = (f: Finger) => new w.Touch({ identifier: f.id, target: f.target, clientX: f.x, clientY: f.y });
+    /** 実際のタッチと同じく、出来事は changed の指が触れ始めた要素に送る */
+    const send = (type: string, touching: Finger[], changed: Finger[]) => {
+      const t = touching.map(toTouch);
+      const c = changed.map(toTouch);
+      changed[0].target.dispatchEvent(
+        new w.TouchEvent(type, { touches: t, targetTouches: t.filter((x) => x.target === changed[0].target), changedTouches: c, bubbles: true, cancelable: true }),
+      );
+    };
+    /** 指を全部離した（打ち切られた）とき、次の操作のために 2 本指の印を消す */
+    const finish = (type: string, changed: Finger[]) => {
+      send(type, [], changed);
+      pbt.endedMulti = pbt.multiTouch;
+      pbt.multiTouch = false;
+    };
+    const newFinger = (p: { x: number; y: number }, id: number): Finger => ({ ...p, id, target: document.elementFromPoint(p.x, p.y) ?? document.body });
+    // 2 本指になった操作の間は、どの出来事でも（2 本目を置く・動かす・片方だけ離す・全部離す）範囲が増えていないかを見る
+    const rects = () => document.querySelectorAll('.redaction-rect').length;
+    const before = rects();
+    pbt.endedMulti = false;
+    const f = pbt.fingers;
+    if (kind === 'down' && f.length === 0) {
+      pbt.multiTouch = false;
+      pbt.fingers = [newFinger(at, 0)];
+      send('touchstart', pbt.fingers, pbt.fingers);
+    } else if ((kind === 'second' || kind === 'secondOutside') && f.length === 1) {
+      const second = newFinger(at, 1);
+      pbt.fingers = [f[0], second];
+      pbt.multiTouch = true;
+      send('touchstart', pbt.fingers, [second]);
+    } else if (kind === 'move' && f.length > 0) {
+      const dx = at.x - f[0].x;
+      const dy = at.y - f[0].y;
+      pbt.fingers = f.map((p, i) => (i === 0 ? { ...p, ...at } : { ...p, x: p.x + dx / 2, y: p.y + dy / 2 }));
+      send('touchmove', pbt.fingers, pbt.fingers);
+    } else if (kind === 'upLast' && f.length === 2) {
+      // 後から置いた指だけを先に離す
+      pbt.fingers = [f[0]];
+      send('touchend', pbt.fingers, [f[1]]);
+    } else if (kind === 'up' && f.length > 0) {
+      pbt.fingers = [];
+      finish('touchend', f);
+    } else if (kind === 'cancel' && f.length > 0) {
+      pbt.fingers = [];
+      finish('touchcancel', f);
+    } else if (kind === 'tap' && f.length === 0) {
+      const finger = newFinger(at, 0);
+      send('touchstart', [finger], [finger]);
+      send('touchend', [], [finger]);
+    }
+    if ((pbt.multiTouch || pbt.endedMulti) && rects() > before) pbt.multiTouchRects++;
+  },
+);
+const TOUCH_POINTS: [number, number][] = [
+  [0.15, 0.15],
+  [0.4, 0.3],
+  [0.7, 0.5],
+  [0.3, 0.7],
+  [0.85, 0.85],
+];
+const touches = actions(() => {
+  const u = ui.current;
+  if (!u.canvasBox) return [];
+  const at = (kind: string) => TOUCH_POINTS.map(([x, y]) => touchAction(kind, x, y));
+  if (u.fingers === 0) return [...at('down'), ...at('tap')];
+  return [
+    ...at('move'),
+    ...(u.fingers === 1 ? [...at('second'), touchAction('secondOutside', 0, 0)] : []),
+    ...(u.fingers === 2 ? [touchAction('upLast', 0, 0)] : []),
+    touchAction('up', 0, 0),
+    touchAction('cancel', 0, 0),
+  ];
+}).when(ready);
+
 /** 操作はまとめて 1 つだけ export する（export したものは全部登録されるので、個々も export すると二重に数えられる） */
 export const all = weighted([
   [3, openFiles],
@@ -288,6 +409,7 @@ export const all = weighted([
   [6, buttons],
   [1, resize],
   [3, waits],
+  [4, touches],
 ]);
 
 // ---- 性質 ----
@@ -354,6 +476,29 @@ export const shownFileStaysShown = always(() => {
   if (u.shownSeq !== u.lastFile.seq) return true;
   return u.lastFileShown;
 });
+
+/** 描きかけの枠は、1 本指で描いている間に 1 つまで。それ以外は残らない（置き去りの枠や点を残さない） */
+export const noStrayDrawings = always(() => ui.current.drawings <= (ui.current.fingers === 1 ? 1 : 0));
+
+/** 「選択範囲をクリア」を押した直後は、範囲の枠も描きかけの枠も 1 つも無い */
+export const clearLeavesNothing = always(() => {
+  const u = ui.current;
+  if (!u.clearedNow || u.busy) return true;
+  return u.overlayRects.length === 0 && u.drawings === 0;
+});
+
+/** 矩形選択で範囲を選べるときは、ブラウザの拡大・縮小（ピンチ）を止めない */
+export const rectModeAllowsPinch = always(() => {
+  const u = ui.current;
+  if (!u.rectMode || !u.selectable) return true;
+  return u.touchAction === 'pinch-zoom';
+});
+
+/** 2 本目の指が触れた操作（ピンチ）では、範囲を作らない（2 本目の指がページの外でも、先に離しても） */
+export const multiTouchMakesNoRect = always(() => ui.current.multiTouchRects === 0);
+
+/** 2 本指のタッチで、アプリが preventDefault しない（ブラウザがピンチとして扱える） */
+export const pinchIsNotPrevented = always(() => ui.current.pinchPrevented === 0);
 
 /** 想定していない失敗の知らせが出ない */
 export const noUnexpectedAlerts = always(() => ui.current.unexpectedAlerts.length === 0);

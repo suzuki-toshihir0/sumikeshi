@@ -107,7 +107,8 @@ PDF の墨消しとは別の道で、Worker も pdf-lib も使わない。範囲
 - **画面（Bombadil）**: `tests/pbt/`。[Bombadil](https://github.com/antithesishq/bombadil)（npm の `@antithesishq/bombadil` に Linux・macOS の実行ファイルが同梱。Chrome は `CHROME` の環境変数か PATH から探す）が、ファイルを開く・範囲を選ぶ・墨消し・頁送り・ダウンロード・画面の大きさの変更をランダムに行い、`spec.ts` の性質（線形時相論理）が毎状態で成り立つかを見る
   - 素材（`make-fixtures.ts` が `.fixtures/` に作る）は、頁・画像ごとに背景の色を変えてあり（`palette.ts`）、canvas の左上の色で何が表示されているかを見分ける
   - 仕込みの操作（`installShim`）で、alert の記録、範囲の記録（枠が描き直されるたびに頁ごとに覚え、墨消しを押したら全頁の分を記録する。文書が替わったかは `#page-container` の `data-doc-revision` で見る）、非同期の処理へのランダムな遅れを入れる。pdf.js の Worker へのやり取りは順番を保って遅らせる（入れ替えると pdf.js 自体が壊れる）
-  - 主な性質: 表示の食い違いが無い（canvas・文字のレイヤー・頁番号・ボタン）、最後に選んだファイルがいつか表示され、表示された後は前のファイルに戻らない、処理中は選べない、墨消しの後に結果を落とせるなら、その文書で墨消しした範囲はどの頁でも黒い、想定外の知らせ・捕まえていない例外が無い
+  - タッチの操作: Bombadil の組み込みにはタッチが無いので、独自の操作（`touch`）でページの中に TouchEvent を作って送る。指を置く・動かす・2 本目を置く・離す・打ち切られる（touchcancel）・タップを別々の操作にして、指を置いたままの間にほかの操作が割り込む順番も試す
+  - 主な性質: 表示の食い違いが無い（canvas・文字のレイヤー・頁番号・ボタン）、最後に選んだファイルがいつか表示され、表示された後は前のファイルに戻らない、処理中は選べない、墨消しの後に結果を落とせるなら、その文書で墨消しした範囲はどの頁でも黒い、描きかけの枠（`.rect-drawing`）が置き去りにならない、「選択範囲をクリア」の直後に枠が 1 つも無い、矩形選択でもピンチを止めない（`touch-action: pinch-zoom`、2 本指のタッチで preventDefault しない）、想定外の知らせ・捕まえていない例外が無い
   - 破れたら終了コード 2。トレースは `npx bombadil browser inspect <トレース>`（画面）か `npx bombadil trace <トレース> --json` で見る。見つけた破れは、E2E で再現してから直す
   - 仕様の書き方: `always` などは `@antithesishq/bombadil`、`extract` などは `@antithesishq/bombadil/browser` から読む。手元のファイルの import は拡張子（`.ts`）まで書く。export した操作の生成器はすべて登録されるので、まとめたもの（`all`）と仕込み（`setup`）だけを export する。負の座標の操作を作ると止まる
 
@@ -116,6 +117,8 @@ PDF の墨消しとは別の道で、Worker も pdf-lib も使わない。範囲
 - **範囲を選べるようになるのを待つ**: 範囲を選べるのは、文書の読み込みと描画（文字のレイヤーまで）が終わってから。墨消しの処理中と、次の文書の読み込み中は、選び方を切り替えても選べない（`SelectionManager` の `active`）。選べるかは `#page-container` の `data-selectable` に出しているので、試験は `waitForRender` でこれを待ってから範囲を選ぶ。
 - **モバイルE2Eはprojects分離**: `playwright.config.ts` の `projects` でdesktop/mobileを振り分け。モバイルは `devices['iPhone 14']` + Chromium（CDPセッション利用のため）。
 - **タッチドラッグ**: Playwrightの `page.touchscreen` は `tap()` のみ提供。ドラッグはCDP `Input.dispatchTouchEvent` で `touchStart` → `touchMove`（複数ステップ）→ `touchEnd` を送る。
+- **タッチの CDP のセッションは使い回す**: `Input.dispatchTouchEvent` の指の状態はセッションごとに持たれる。触れる・動かす・離すを別々のセッションで送ると「Must send a TouchStart first」で失敗する
+- **本物のピンチ（ブラウザの拡大）は試せない**: 画面を出さない Chromium では、`Input.synthesizePinchGesture` のタッチの操作で倍率が変わらない（何も開いていない画面でも）。マウスの側の操作は効くが `touch-action` を無視するので代わりにならない。E2E では、アプリがピンチを止めていないこと（`touch-action` と、2 本指で preventDefault しないこと）を確かめ、拡大そのものは iPhone で確かめる
 - **テキスト選択モードのモバイルE2Eは未実装**: テキスト選択モード（`text-selection.ts`）はモバイルで `selectionchange` イベントのデバウンス（500ms）経由で動作するが、E2Eテストが困難なため意図的にスキップしている。理由: モバイルのテキスト選択はOS/ブラウザのネイティブlong-press動作に依存しており、Playwrightにはlong-press APIがない。CDPで `touchStart` を長時間保持してもChromiumがネイティブテキスト選択として認識する保証がなく、テストが不安定になる。
 
 ## コーディング規約
