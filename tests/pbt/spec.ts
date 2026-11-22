@@ -15,14 +15,21 @@ import { FIXTURES } from './.fixtures/paths.ts';
 import { identify } from './palette.ts';
 export { noUncaughtExceptions, noUnhandledPromiseRejections, noConsoleErrors } from '@antithesishq/bombadil/browser/defaults/properties';
 
-/** 墨消しのボタンを押したときに記録する、範囲の中心（canvas の幅・高さに対する割合）と、表示していたもの */
-type RedactRecord = { seq: number; identity: string | null; centers: [number, number][] };
+/** 範囲の中心（canvas の幅・高さに対する割合） */
+type Centers = [number, number][];
+/**
+ * 頁ごとの範囲の中心。キーは頁（画像）の色の名前（palette.ts）、rev は開いた文書の番号（#page-container の data-doc-revision）。
+ * 墨消しを押したときに、その文書の全頁の分を記録する（枠が見えている頁だけでなく、ほかの頁に付けた範囲も確かめる）
+ */
+type PageRects = { rev: string; pages: Record<string, Centers> };
 /** 最後に選んだファイルの名前、選んだ順の番号、処理中だったため断られたか */
 type LastFile = { name: string; seq: number; refused: boolean };
 type Pbt = {
   alerts: string[];
-  redact: RedactRecord | null;
-  seq: number;
+  /** 墨消しを押したときの記録 */
+  redact: PageRects | null;
+  /** まだ墨消ししていない範囲（枠が描き直されるたびに、そのときの頁の分を更新する） */
+  pending: PageRects;
   lastFile: LastFile | null;
   /** 範囲を選べる状態で表示されたことのある、最後に選んだファイルの番号 */
   shownSeq: number;
@@ -66,9 +73,12 @@ const ui = extract((s) => {
   };
 
   const pbt = w.__pbt;
-  const redact = pbt?.redact ?? null;
   const selectable = container?.dataset.selectable === 'true';
   const corner = pixel(0.03, 0.03);
+  const docRevision = container?.dataset.docRevision ?? '';
+  // 墨消しの記録のうち、いま表示している文書・頁の分
+  const record = pbt?.redact && pbt.redact.rev === docRevision ? pbt.redact : null;
+  const recorded = record ? (record.pages[identify(corner) ?? ''] ?? []) : [];
   // 最後に選んだファイルが、範囲を選べる状態で表示されたら、ページの側に印を付ける（後の状態の性質で使う）
   const lastFile = pbt?.lastFile ?? null;
   const prefix = lastFile ? SHOWN_AS[lastFile.name] : undefined;
@@ -99,13 +109,15 @@ const ui = extract((s) => {
       return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
     }),
     unexpectedAlerts: (pbt?.alerts ?? []).filter((m) => !EXPECTED_ALERTS.some((p) => m.startsWith(p))),
-    redact,
+    docRevision,
+    /** 墨消しの記録が、いま表示している文書のものか */
+    hasRecord: !!record,
     lastFile,
     /** 最後に選んだファイルが、いま表示されている */
     lastFileShown: shown,
     shownSeq: pbt?.shownSeq ?? 0,
-    /** 記録した範囲の中心の色 */
-    redactedColors: redact ? redact.centers.map(([fx, fy]) => pixel(fx, fy)) : [],
+    /** いま表示している頁で、墨消しを押したときに記録した範囲の中心の色 */
+    redactedColors: recorded.map(([fx, fy]) => pixel(fx, fy)),
   };
 });
 
@@ -117,7 +129,7 @@ const ui = extract((s) => {
  */
 const installShim = registerCustomAction('installShim', async (document, window) => {
   const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
-  const pbt: Pbt = { alerts: [], redact: null, seq: 0, lastFile: null, shownSeq: 0 };
+  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0 };
   let fileSeq = 0;
   w.__pbt = pbt;
   w.alert = (m?: unknown) => {
@@ -136,34 +148,48 @@ const installShim = registerCustomAction('installShim', async (document, window)
   );
   const rand = (max: number) => Math.floor(Math.random() * max);
 
+  const container = document.getElementById('page-container') as HTMLElement;
+  const overlay = document.getElementById('overlay-layer') as HTMLElement;
+  const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement;
+  /** いま表示している頁の色の名前（描き直しの途中なら null） */
+  const pageId = (): string | null => {
+    if (container.dataset.selectable !== 'true') return null;
+    const ctx = canvas.getContext('2d');
+    if (!ctx || canvas.width < 4) return null;
+    return identify(Array.from(ctx.getImageData(Math.floor(canvas.width * 0.03), Math.floor(canvas.height * 0.03), 1, 1).data.slice(0, 3)));
+  };
+  const overlayCenters = (): Centers => {
+    const cb = canvas.getBoundingClientRect();
+    return Array.from(overlay.querySelectorAll('.redaction-rect')).map((e) => {
+      const r = e.getBoundingClientRect();
+      return [(r.x + r.width / 2 - cb.x) / cb.width, (r.y + r.height / 2 - cb.y) / cb.height] as [number, number];
+    });
+  };
+  const rev = () => container.dataset.docRevision ?? '';
+
+  // 枠が描き直されるたびに（範囲の追加・削除、頁の表示）、その頁の範囲を覚える。文書が替わったら前の分は捨てる
+  new w.MutationObserver(() => {
+    const id = pageId();
+    if (!id) return;
+    if (pbt.pending.rev !== rev()) pbt.pending = { rev: rev(), pages: {} };
+    pbt.pending.pages[id] = overlayCenters();
+  }).observe(overlay, { childList: true });
+
+  // 「選択範囲をクリア」は全頁の範囲を消す
+  document.getElementById('btn-clear')?.addEventListener('click', () => (pbt.pending = { rev: rev(), pages: {} }), true);
+
   document.getElementById('btn-redact')?.addEventListener(
     'click',
     () => {
-      const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement;
-      const cb = canvas.getBoundingClientRect();
-      const ctx = canvas.getContext('2d');
-      const corner = ctx ? Array.from(ctx.getImageData(Math.floor(canvas.width * 0.03), Math.floor(canvas.height * 0.03), 1, 1).data.slice(0, 3)) : null;
-      const centers = Array.from(document.querySelectorAll('.redaction-rect')).map((e) => {
-        const r = e.getBoundingClientRect();
-        return [(r.x + r.width / 2 - cb.x) / cb.width, (r.y + r.height / 2 - cb.y) / cb.height] as [number, number];
-      });
+      if (pbt.pending.rev !== rev()) return;
       // 範囲が無いときは、アプリは知らせを出すだけで前の結果を残すので、前の記録も残す（空で上書きすると、以後の確かめが空回りする）
-      if (centers.length === 0) return;
-      pbt.seq++;
-      pbt.redact = { seq: pbt.seq, identity: JSON.stringify(corner), centers };
+      if (!Object.values(pbt.pending.pages).some((c) => c.length > 0)) return;
+      pbt.redact = { rev: pbt.pending.rev, pages: { ...pbt.pending.pages } };
+      // 墨消しが済めばアプリは範囲を消す
+      pbt.pending = { rev: rev(), pages: {} };
     },
     true,
   );
-
-  // 墨消しの記録は、その文書のもの。新しい文書を開いたら捨てる（開き直した同じ文書の未加工の頁を、古い記録で調べない）。
-  // アプリは新しい文書を開くとダウンロードのボタンを隠す。墨消しを始めるときも隠すが、そのときは処理中（墨消しのボタンが押せない）
-  const download = document.getElementById('btn-download');
-  const redactButton = document.getElementById('btn-redact') as HTMLButtonElement | null;
-  if (download) {
-    new w.MutationObserver(() => {
-      if (download.hidden && !redactButton?.disabled) pbt.redact = null;
-    }).observe(download, { attributes: true, attributeFilter: ['hidden'] });
-  }
 
   // pdf.js の Worker へのやり取り: 順番を保ったまま遅らせる
   const post = w.Worker.prototype.postMessage;
@@ -287,18 +313,14 @@ export const notSelectableWhileBusy = always(() => !(ui.current.selectable && ui
 export const busyEnds = always(now(() => ui.current.busy).implies(eventually(() => !ui.current.busy).within(30, 'seconds')));
 
 /**
- * 墨消しの結果を落とせて、画面が墨消ししたときと同じものを表示しているなら、墨消しした範囲は画面で黒い
- * （墨消しを押したときの枠の中心を記録しておき、その位置の色を見る）
+ * 墨消しの結果を落とせるなら、その文書で墨消しした範囲は、どの頁でも画面で黒い
+ * （墨消しを押したときに全頁の範囲の中心を記録しておき、いま表示している頁の分の色を見る）
  */
 export const redactedAreasAreBlack = always(() => {
   const u = ui.current;
-  const r = u.redact;
-  if (!r || r.centers.length === 0 || u.busy || !u.selectable || !u.downloadVisible) return true;
-  // 墨消しの後に頁を送ったり、別の文書を開いたりしていたら見ない
-  if (identify(u.corner) !== identify(JSON.parse(r.identity ?? 'null'))) return true;
+  if (!u.hasRecord || u.busy || !u.selectable || !u.downloadVisible) return true;
   return u.redactedColors.every((c) => !!c && Math.max(...c) <= 40);
 });
-
 
 /**
  * 最後に選んだファイル（開けるもので、処理中で断られていないもの）は、次のファイルを選ばない限り、20 秒以内に表示される。

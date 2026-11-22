@@ -35,6 +35,7 @@ class App {
   private docRevision = 0;
   private dropZone: HTMLElement;
   private pageWrapper: HTMLElement;
+  private pageContainer: HTMLElement;
 
   constructor() {
     const canvas = document.getElementById('pdf-canvas') as HTMLCanvasElement;
@@ -43,6 +44,7 @@ class App {
     const pageContainerEl = document.getElementById('page-container') as HTMLElement;
     this.dropZone = document.getElementById('drop-zone') as HTMLElement;
     this.pageWrapper = document.getElementById('page-wrapper') as HTMLElement;
+    this.pageContainer = pageContainerEl;
 
     const viewerContainerEl = document.getElementById('viewer-container') as HTMLElement;
 
@@ -208,7 +210,7 @@ class App {
       if (request !== this.loadRequest || this.refuseWhileBusy()) return;
     }
 
-    const revision = ++this.docRevision;
+    const revision = this.nextRevision();
     this.store.clear();
     // 前の文書の墨消しの結果を落とせないようにする
     this.redactedBytes = null;
@@ -260,9 +262,19 @@ class App {
     this.selection.enable();
   }
 
+  /**
+   * 開いた文書の番号を進める。番号は #page-container の data-doc-revision にも出す
+   * （画面の性質の試験 tests/pbt が、文書が替わったかを見分けるのに使う）
+   */
+  private nextRevision(): number {
+    const revision = ++this.docRevision;
+    this.pageContainer.dataset.docRevision = String(revision);
+    return revision;
+  }
+
   /** 何も開いていない最初の画面に戻す */
   private showEmpty(): void {
-    this.docRevision++;
+    this.nextRevision();
     this.viewer.destroy();
     this.imageViewer.unload();
     this.image = null;
