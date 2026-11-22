@@ -28,6 +28,8 @@ export class RectSelection {
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+    // 止めたら、ドラッグの途中のものは捨てる（文書の切り替えをまたいだドラッグを、次の文書の範囲にしない）
+    if (!enabled) this.cancelDrag();
     this.overlayEl.style.pointerEvents = enabled ? 'auto' : 'none';
     this.pageContainerEl.style.cursor = enabled ? 'crosshair' : '';
     this.pageContainerEl.style.touchAction = enabled ? 'none' : '';
@@ -166,6 +168,12 @@ export class RectSelection {
     this.drawingEl.remove();
     this.drawingEl = null;
   };
+
+  private cancelDrag(): void {
+    this.isDragging = false;
+    this.drawingEl?.remove();
+    this.drawingEl = null;
+  }
 
   destroy(): void {
     this.pageContainerEl.removeEventListener('mousedown', this.handleMouseDown);

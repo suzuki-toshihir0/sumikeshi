@@ -492,6 +492,24 @@ test.describe('写真の墨消し', () => {
     await expect(page.locator('.redaction-rect')).toHaveCount(1);
   });
 
+  test('文書の切り替えをまたいだドラッグは、範囲にしない', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#file-input').setInputFiles(samplePdf);
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    const box = (await page.locator('#pdf-canvas').boundingBox())!;
+    // 前の文書の上で押し始め、押したまま次の文書を開き、開き終えてから離す
+    await page.mouse.move(box.x + 50, box.y + 50);
+    await page.mouse.down();
+    await page.mouse.move(box.x + 120, box.y + 90, { steps: 3 });
+    await openFile(page, 'a.png', await makeImage(page, 320, 240, 'image/png'), 'image/png');
+    await waitForRender(page);
+    await page.mouse.move(box.x + 200, box.y + 120, { steps: 3 });
+    await page.mouse.up();
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+    await expect(page.locator('.rect-drawing')).toHaveCount(0);
+  });
+
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {
     await page.goto('/');
     const big = await makeImage(page, 8200, 4, 'image/png');
