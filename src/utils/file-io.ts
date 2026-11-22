@@ -8,9 +8,9 @@ export function readFileAsArrayBuffer(file: File): Promise<ArrayBuffer> {
   });
 }
 
-/** ArrayBufferをBlobとしてダウンロードする */
-export function downloadPdf(data: Uint8Array, filename: string): void {
-  const blob = new Blob([data.buffer as ArrayBuffer], { type: 'application/pdf' });
+/** バイト列をファイルとしてダウンロードする */
+export function downloadBytes(data: Uint8Array, filename: string, mime: string): void {
+  const blob = new Blob([data as Uint8Array<ArrayBuffer>], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

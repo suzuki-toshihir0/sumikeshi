@@ -26,4 +26,9 @@ export class PageNavigator {
   show(): void {
     this.nav.hidden = false;
   }
+
+  /** 画像は 1 枚なので頁送りを出さない */
+  hide(): void {
+    this.nav.hidden = true;
+  }
 }

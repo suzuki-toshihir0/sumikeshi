@@ -1,11 +1,10 @@
-import type { PageViewport } from 'pdfjs-dist';
 import type { RedactionStore } from '../redaction/redaction-store';
-import { cssToPdfRect } from '../utils/coordinates';
+import { cssToPdfRect, type PageView } from '../utils/coordinates';
 
 export class RectSelection {
   private enabled = false;
   private pageNum = 1;
-  private viewport: PageViewport | null = null;
+  private viewport: PageView | null = null;
   private isDragging = false;
   private startX = 0;
   private startY = 0;
@@ -29,18 +28,30 @@ export class RectSelection {
 
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
+    // 止めたら、ドラッグの途中のものは捨てる（文書の切り替えをまたいだドラッグを、次の文書の範囲にしない）
+    if (!enabled) this.cancelDrag();
     this.overlayEl.style.pointerEvents = enabled ? 'auto' : 'none';
     this.pageContainerEl.style.cursor = enabled ? 'crosshair' : '';
     this.pageContainerEl.style.touchAction = enabled ? 'none' : '';
   }
 
-  setPageContext(pageNum: number, viewport: PageViewport): void {
+  setPageContext(pageNum: number, viewport: PageView): void {
+    // 頁の座標が替わったら、前の座標で押し始めたドラッグは捨てる
+    this.cancelDrag();
     this.pageNum = pageNum;
     this.viewport = viewport;
   }
 
+  /** 頁の座標を外す（頁を描き直している間は、範囲を選ばない。途中のドラッグも捨てる） */
+  clearPageContext(): void {
+    this.viewport = null;
+    this.cancelDrag();
+  }
+
   private handleMouseDown = (e: MouseEvent): void => {
-    if (!this.enabled || e.button !== 0) return;
+    // 頁を描き直している間（座標が無い間）は、ドラッグを始めない。描き直しをまたぐドラッグも捨てる（setPageContext）。
+    // 描き直しの前の座標しか無いので、捨てないと別の頁や古い表示の位置に範囲が付く（意図した振る舞い）
+    if (!this.enabled || !this.viewport || e.button !== 0) return;
     // 既存の墨消し矩形をクリックした場合はドラッグ開始しない
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;
 
@@ -103,7 +114,7 @@ export class RectSelection {
   };
 
   private handleTouchStart = (e: TouchEvent): void => {
-    if (!this.enabled) return;
+    if (!this.enabled || !this.viewport) return;
     if ((e.target as HTMLElement).classList.contains('redaction-rect')) return;
 
     const touch = e.touches[0];
@@ -167,6 +178,12 @@ export class RectSelection {
     this.drawingEl.remove();
     this.drawingEl = null;
   };
+
+  private cancelDrag(): void {
+    this.isDragging = false;
+    this.drawingEl?.remove();
+    this.drawingEl = null;
+  }
 
   destroy(): void {
     this.pageContainerEl.removeEventListener('mousedown', this.handleMouseDown);

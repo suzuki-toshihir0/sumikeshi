@@ -6,10 +6,15 @@ import { SelectionManager } from './selection/selection-manager';
 import { RedactionStore } from './redaction/redaction-store';
 import { RedactionError } from './redaction/errors';
 import { runRedactionInWorker } from './redaction/redaction-runner';
-import { readFileAsArrayBuffer, downloadPdf } from './utils/file-io';
+import type { PdfRect } from './utils/coordinates';
+import { readFileAsArrayBuffer, downloadBytes } from './utils/file-io';
+import { ImageViewer } from './viewer/image-viewer';
+import { ImageDocument } from './image/image-document';
+import { detectFileKind } from './image/image-format';
 
 class App {
   private viewer: PdfViewer;
+  private imageViewer: ImageViewer;
   private toolbar: Toolbar;
   private pageNav: PageNavigator;
   private overlay: Overlay;
@@ -18,8 +23,14 @@ class App {
 
   private originalBytes: ArrayBuffer | null = null;
   private redactedBytes: Uint8Array | null = null;
+  /** 開いている画像（PDF のときは null）。墨消しは手元の画素に重ねていき、書き出すたびに 1 回だけ圧縮する */
+  private image: ImageDocument | null = null;
+  /** 画像でこれまでに墨消しした範囲（書き出した画像でも黒いことを確かめる） */
+  private imageRedacted: PdfRect[] = [];
   /** 墨消しの処理中（範囲の追加・削除と、別の PDF を開くことを止める） */
   private busy = false;
+  /** 開こうとしたファイルの番号。読み込みの途中で次のファイルが選ばれたら、前のものは開かない */
+  private loadRequest = 0;
   /** 開いた文書の番号。処理中に文書が替わったら、古い処理の結果を捨てる */
   private docRevision = 0;
   private dropZone: HTMLElement;
@@ -37,6 +48,7 @@ class App {
 
     this.store = new RedactionStore();
     this.viewer = new PdfViewer(canvas, textLayerEl, viewerContainerEl);
+    this.imageViewer = new ImageViewer(canvas, textLayerEl, viewerContainerEl);
     this.toolbar = new Toolbar();
     this.pageNav = new PageNavigator();
     this.overlay = new Overlay(overlayEl, this.store);
@@ -63,6 +75,11 @@ class App {
 
     // ページ描画完了時
     this.viewer.onPageRendered = (pageNum, viewport) => {
+      this.selection.setPageContext(pageNum, viewport);
+      this.overlay.render(pageNum, viewport);
+    };
+    this.viewer.onRenderStart = () => this.selection.clearPageContext();
+    this.imageViewer.onPageRendered = (pageNum, viewport) => {
       this.selection.setPageContext(pageNum, viewport);
       this.overlay.render(pageNum, viewport);
     };
@@ -115,14 +132,15 @@ class App {
     window.addEventListener('resize', () => {
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
-        this.viewer.resize();
+        if (this.image) this.imageViewer.render();
+        else this.viewer.resize();
       }, 200);
     });
   }
 
   private setupMobileDropZone(): void {
     if ('ontouchstart' in window) {
-      this.dropZone.textContent = 'PDFを選択';
+      this.dropZone.textContent = 'PDF・画像を選択';
       this.dropZone.style.cursor = 'pointer';
       this.dropZone.addEventListener('click', () => {
         const fileInput = document.getElementById('file-input') as HTMLInputElement;
@@ -144,23 +162,49 @@ class App {
     this.dropZone.addEventListener('drop', (e) => {
       e.preventDefault();
       this.dropZone.classList.remove('dragover');
+      // 形式は中身で決める（loadFile）。開けない形式なら、そこで理由を伝える
       const file = e.dataTransfer?.files[0];
-      if (file && file.type === 'application/pdf') {
+      if (file) {
         this.loadFile(file);
       }
     });
   }
 
   private async loadFile(file: File): Promise<void> {
-    if (this.busy) {
-      alert('墨消しの処理中は、ほかの PDF を開けません。処理が終わってから開いてください。');
+    if (this.refuseWhileBusy()) return;
+    const request = ++this.loadRequest;
+    let fileBytes: ArrayBuffer;
+    try {
+      fileBytes = await readFileAsArrayBuffer(file);
+    } catch (err) {
+      if (request !== this.loadRequest) return;
+      alert(err instanceof Error ? err.message : String(err));
       return;
     }
-    this.docRevision++;
-    const fileBytes = await readFileAsArrayBuffer(file);
-    // pdf-libで後から使うためにコピーを保持する
-    // (pdfjs-distがWorkerにtransferするとdetachedになるため)
-    this.originalBytes = fileBytes.slice(0);
+    // 読んでいる間に次のファイルが選ばれていたら開かない。墨消しが始まっていたら、理由を伝えて開かない
+    if (request !== this.loadRequest || this.refuseWhileBusy()) return;
+    const kind = detectFileKind(new Uint8Array(fileBytes));
+    if (!kind) {
+      alert('開けるのは PDF と画像（JPEG・PNG・WebP・AVIF、Safari では HEIC も）です。');
+      return;
+    }
+    // 画像は開く前に読んでおく（読めない・大きすぎる画像では、今開いている文書をそのまま残す）
+    let image: ImageDocument | null = null;
+    if (kind.kind === 'image') {
+      try {
+        image = await ImageDocument.decode(new Uint8Array(fileBytes), kind.format);
+      } catch (err) {
+        // 読んでいる間に次のファイルが選ばれていたら、前のファイルのことは知らせない
+        if (request !== this.loadRequest) return;
+        const e = err instanceof Error ? err : new Error(String(err));
+        console.warn('画像の読み込みエラー:', e.message);
+        alert(`この画像は開けません。\n${e.message}`);
+        return;
+      }
+      if (request !== this.loadRequest || this.refuseWhileBusy()) return;
+    }
+
+    const revision = ++this.docRevision;
     this.store.clear();
     // 前の文書の墨消しの結果を落とせないようにする
     this.redactedBytes = null;
@@ -171,23 +215,88 @@ class App {
     this.dropZone.hidden = true;
     this.pageWrapper.hidden = false;
     this.toolbar.showControls();
-    this.pageNav.show();
+    this.toolbar.setDocumentKind(kind.kind);
+    // 次の文書を表示し終えるまでは範囲を選ばせない（画面に残る前の文書の上で選んだ範囲を、次の文書に当てない）。
+    // 選び方の切り替え（setDocumentKind）が選択を有効にするので、その後で止める
+    this.selection.disable();
+    this.overlay.clear();
 
-    await this.viewer.load(fileBytes);
+    if (image) {
+      this.image = image;
+      this.imageRedacted = [];
+      this.originalBytes = null;
+      this.viewer.destroy();
+      this.pageNav.hide();
+      this.imageViewer.load(image);
+    } else {
+      this.image = null;
+      this.imageRedacted = [];
+      this.imageViewer.unload();
+      // pdf-libで後から使うためにコピーを保持する
+      // (pdfjs-distがWorkerにtransferするとdetachedになるため)
+      this.originalBytes = fileBytes.slice(0);
+      this.pageNav.show();
+      try {
+        await this.viewer.load(fileBytes);
+      } catch (err) {
+        // 次の文書を開いたなら、そちらが画面を持つ
+        if (revision !== this.docRevision) return;
+        const e = err instanceof Error ? err : new Error(String(err));
+        console.warn('PDF の読み込みエラー:', e.message);
+        // 画面に残る前の文書と、読めなかった PDF のバイト列を結び付けないよう、何も開いていない画面に戻す
+        this.showEmpty();
+        // 読んでいる間に次のファイルが選ばれていたら、前のファイルのことは知らせない（次のファイルが開くか、そちらで理由を伝える）
+        if (request === this.loadRequest) alert(`この PDF を開けませんでした。\n${e.message}`);
+        return;
+      }
+      // 読んでいる間に次の文書を開いたか、墨消しが始まっていたら、範囲を選べるようにしない
+      // （墨消しが終われば、そちらで選べるようにする）。開けなかったファイルは文書を替えないので、ここでは数えない
+      if (revision !== this.docRevision || this.busy) return;
+    }
     this.selection.enable();
   }
 
+  /** 何も開いていない最初の画面に戻す */
+  private showEmpty(): void {
+    this.docRevision++;
+    this.viewer.destroy();
+    this.imageViewer.unload();
+    this.image = null;
+    this.imageRedacted = [];
+    this.originalBytes = null;
+    this.redactedBytes = null;
+    this.store.clear();
+    this.overlay.clear();
+    this.selection.disable();
+    this.toolbar.hideDownload();
+    this.toolbar.hideControls();
+    this.pageNav.hide();
+    this.pageWrapper.hidden = true;
+    this.dropZone.hidden = false;
+  }
+
+  /** 墨消しの処理中なら、ファイルを開かずに理由を伝えて true を返す */
+  private refuseWhileBusy(): boolean {
+    if (!this.busy) return false;
+    alert('墨消しの処理中は、ほかのファイルを開けません。処理が終わってから開いてください。');
+    return true;
+  }
+
   private refreshOverlay(): void {
-    const viewport = this.viewer.viewport;
+    const viewport = this.image ? this.imageViewer.viewport : this.viewer.viewport;
     if (viewport) {
-      this.overlay.render(this.viewer.currentPageNumber, viewport);
+      this.overlay.render(this.image ? 1 : this.viewer.currentPageNumber, viewport);
     }
   }
 
   private async executeRedaction(): Promise<void> {
-    if (!this.originalBytes) return;
+    if (!this.originalBytes && !this.image) return;
     if (!this.store.hasRects) {
       alert('墨消し対象の領域を選択してください。');
+      return;
+    }
+    if (this.image) {
+      await this.executeImageRedaction(this.image);
       return;
     }
 
@@ -203,7 +312,7 @@ class App {
       // Worker に渡すと元の ArrayBuffer は使えなくなるので、写しを渡す
       const result = await runRedactionInWorker(
         () => new Worker(new URL('./redaction/redaction-worker.ts', import.meta.url), { type: 'module' }),
-        this.originalBytes.slice(0),
+        this.originalBytes!.slice(0),
         this.store.getAllRects(),
       );
       // 処理中に文書が替わっていたら、古い文書の結果は使わない
@@ -248,12 +357,51 @@ class App {
     }
   }
 
+  /**
+   * 画像の墨消し。手元の画素の範囲を黒に置き換えてから書き出す。
+   * 書き出せなかったら、置き換えた画素は戻さないが（戻すと黒の下の画素を手元に持ち続ける）、結果は落とさせない
+   */
+  private async executeImageRedaction(image: ImageDocument): Promise<void> {
+    this.busy = true;
+    this.selection.disable();
+    this.toolbar.setBusy(true);
+    const revision = this.docRevision;
+    // 前回の結果は先に落とせなくする（今回の墨消しに失敗したとき、今回の範囲が残った画像を渡さない）
+    this.redactedBytes = null;
+    this.toolbar.hideDownload();
+    try {
+      const rects = this.store.getRectsForPage(1).slice();
+      image.redact(rects);
+      this.imageRedacted.push(...rects);
+      this.store.clear();
+      this.overlay.clear();
+      this.imageViewer.render();
+      const result = await image.encode(this.imageRedacted);
+      if (revision !== this.docRevision) return;
+      this.redactedBytes = result;
+      this.toolbar.showDownload();
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      console.error('画像の墨消しエラー:', e.message, e.stack);
+      alert(`墨消しした画像を書き出せませんでした。\n${e.message}`);
+    } finally {
+      this.busy = false;
+      this.toolbar.setBusy(false);
+      if (revision === this.docRevision) this.selection.enable();
+    }
+  }
+
   private downloadRedacted(): void {
     if (!this.redactedBytes) {
       alert('先に墨消しを実行してください。');
       return;
     }
-    downloadPdf(this.redactedBytes, 'redacted.pdf');
+    if (this.image) {
+      const { mime, extension } = this.image.output;
+      downloadBytes(this.redactedBytes, `redacted.${extension}`, mime);
+    } else {
+      downloadBytes(this.redactedBytes, 'redacted.pdf', 'application/pdf');
+    }
   }
 }
 

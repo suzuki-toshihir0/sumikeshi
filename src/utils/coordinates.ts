@@ -1,5 +1,11 @@
 import type { PageViewport } from 'pdfjs-dist';
 
+/**
+ * 表示の座標の変換に使う、PageViewport の一部。
+ * 画像は pdf.js の頁ではないので、同じ形のものを `imageViewport` で作る（pdf.js は PageViewport を外に出していない）
+ */
+export type PageView = Pick<PageViewport, 'width' | 'height' | 'scale' | 'convertToPdfPoint' | 'convertToViewportPoint'>;
+
 /** CSS座標系の矩形 */
 export interface CssRect {
   left: number;
@@ -19,7 +25,7 @@ export interface PdfRect {
 }
 
 /** CSS座標 → PDF座標に変換 */
-export function cssToPdfRect(cssRect: CssRect, viewport: PageViewport): PdfRect {
+export function cssToPdfRect(cssRect: CssRect, viewport: PageView): PdfRect {
   const [x1, y1] = viewport.convertToPdfPoint(cssRect.left, cssRect.top);
   const [x2, y2] = viewport.convertToPdfPoint(
     cssRect.left + cssRect.width,
@@ -34,7 +40,7 @@ export function cssToPdfRect(cssRect: CssRect, viewport: PageViewport): PdfRect 
 }
 
 /** PDF座標 → CSS座標に変換 */
-export function pdfToCssRect(pdfRect: PdfRect, viewport: PageViewport): CssRect {
+export function pdfToCssRect(pdfRect: PdfRect, viewport: PageView): CssRect {
   const [cssX1, cssY1] = viewport.convertToViewportPoint(pdfRect.x, pdfRect.y + pdfRect.height);
   const [cssX2, cssY2] = viewport.convertToViewportPoint(pdfRect.x + pdfRect.width, pdfRect.y);
   return {
@@ -42,5 +48,19 @@ export function pdfToCssRect(pdfRect: PdfRect, viewport: PageViewport): CssRect 
     top: Math.min(cssY1, cssY2),
     width: Math.abs(cssX2 - cssX1),
     height: Math.abs(cssY2 - cssY1),
+  };
+}
+
+/**
+ * 画像の表示の座標。PDF の頁と同じく左下を原点とし、1 画素を 1 単位とする
+ * （範囲の選択・枠の表示・墨消しを、PDF と同じ形の矩形で扱えるように）
+ */
+export function imageViewport(imageWidth: number, imageHeight: number, scale: number): PageView {
+  return {
+    width: imageWidth * scale,
+    height: imageHeight * scale,
+    scale,
+    convertToPdfPoint: (x: number, y: number) => [x / scale, imageHeight - y / scale],
+    convertToViewportPoint: (x: number, y: number) => [x * scale, (imageHeight - y) * scale],
   };
 }

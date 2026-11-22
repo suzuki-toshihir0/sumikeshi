@@ -11,16 +11,16 @@
              font-src 'self';
              worker-src 'self' blob:;
              connect-src 'self';" />
-  <title>sumikeshi - PDF墨消しツール</title>
+  <title>sumikeshi - PDF・画像の墨消しツール</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <div id="app">
     <header id="toolbar">
       <div class="toolbar-group">
-        <label class="file-select-btn" title="PDF を開く">
+        <label class="file-select-btn" title="PDF・画像を開く">
           <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m17 8-5-5-5 5"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/></svg>
-          <input type="file" id="file-input" accept=".pdf,application/pdf" />
+          <input type="file" id="file-input" accept=".pdf,application/pdf,image/jpeg,image/png,image/webp,image/avif" />
         </label>
       </div>
       <div class="toolbar-separator mode-group" hidden></div>
@@ -35,13 +35,13 @@
         <button id="btn-clear" class="action-btn" title="選択範囲をクリア"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></svg></button>
         <span class="toolbar-separator"></span>
         <button id="btn-redact" class="action-btn primary" title="選択した範囲を墨消し"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m14.622 17.897-10.68-2.913"/><path d="M18.376 2.622a1 1 0 1 1 3.002 3.002L17.36 9.643a.5.5 0 0 0 0 .707l.944.944a2.41 2.41 0 0 1 0 3.408l-.944.944a.5.5 0 0 1-.707 0L8.354 7.348a.5.5 0 0 1 0-.707l.944-.944a2.41 2.41 0 0 1 3.408 0l.944.944a.5.5 0 0 0 .707 0z"/><path d="M9 8c-1.804 2.71-3.97 3.46-6.583 3.948a.507.507 0 0 0-.302.819l7.32 8.883a1 1 0 0 0 1.185.204C12.735 20.405 16 16.792 16 15"/></svg></button>
-        <button id="btn-download" class="action-btn download" title="墨消し済みPDFをダウンロード" hidden><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></button>
+        <button id="btn-download" class="action-btn download" title="墨消ししたファイルをダウンロード" hidden><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></button>
       </div>
     </header>
 
     <main id="viewer-container">
       <div id="drop-zone">
-        <p>PDFファイルをドラッグ＆ドロップ、<br>または上の「PDF を開く」ボタンから選択</p>
+        <p>PDF・画像（写真）をドラッグ＆ドロップ、<br>または上の「PDF・画像を開く」ボタンから選択</p>
       </div>
       <div id="page-wrapper" hidden>
         <div id="page-container">
