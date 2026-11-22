@@ -180,13 +180,25 @@ test.describe('モバイル対応', () => {
     /** 頁ごとの CDP のセッション（タッチの状態はセッションごとに持たれるので、1 つの試験の中では使い回す） */
     const sessions = new WeakMap<Page, CDPSession>();
     /** CDP でタッチの出来事を 1 つ送る（touchPoints は、そのとき触れている指すべて） */
-    async function touch(page: Page, type: 'touchStart' | 'touchMove' | 'touchEnd' | 'touchCancel', points: P[]) {
+    async function touch(page: Page, type: 'touchStart' | 'touchMove' | 'touchEnd' | 'touchCancel', points: P[], firstId = 0) {
       let cdp = sessions.get(page);
       if (!cdp) {
         cdp = await page.context().newCDPSession(page);
         sessions.set(page, cdp);
       }
-      await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map((p, id) => ({ ...p, id })) });
+      await cdp.send('Input.dispatchTouchEvent', { type, touchPoints: points.map((p, i) => ({ ...p, id: firstId + i })) });
+    }
+
+    /**
+     * 触れている指のうち、finger だけを離す（ほかの指は触れたまま）。
+     * この版の Chromium は touchEnd に渡した指を離すが、CDP の説明（touchEnd には指を渡さない）と食い違い、版によって変わりうる。
+     * 意図した指が離れたことを、ページが受け取った touchend で確かめる（変わったら、黙って別の筋書きを試さずに落ちる）
+     */
+    async function releaseOnly(page: Page, finger: P, all: P[]) {
+      await page.evaluate(() => ((window as unknown as { lastTouchEnd: string }).lastTouchEnd = ''));
+      await touch(page, 'touchEnd', [finger].map((f) => ({ ...f })), all.indexOf(finger));
+      const released = await page.evaluate(() => (window as unknown as { lastTouchEnd: string }).lastTouchEnd);
+      expect(released).toBe(`${Math.round(finger.x)},${Math.round(finger.y)} remaining=${all.length - 1}`);
     }
 
     async function openInRectMode(page: Page) {
@@ -195,6 +207,13 @@ test.describe('モバイル対応', () => {
       await expect(page.locator('#page-info')).toContainText('1 / 2');
       await page.locator('#btn-rect-mode').tap();
       await page.locator('#page-container[data-selectable="true"]').waitFor({ state: 'attached' });
+      // 最後に受け取った touchend（離れた指の位置と、残った指の数）を記録する
+      await page.evaluate(() =>
+        window.addEventListener('touchend', (e) => {
+          const c = e.changedTouches[0];
+          (window as unknown as { lastTouchEnd: string }).lastTouchEnd = `${Math.round(c.clientX)},${Math.round(c.clientY)} remaining=${e.touches.length}`;
+        }),
+      );
       return (await page.locator('#page-container').boundingBox())!;
     }
 
@@ -237,8 +256,10 @@ test.describe('モバイル対応', () => {
       await touch(page, 'touchMove', [{ x: a.x + 40, y: a.y + 30 }]);
       // 2 本目の指（ピンチを始めようとした）
       await touch(page, 'touchStart', [{ x: a.x + 40, y: a.y + 30 }, { x: a.x + 120, y: a.y + 90 }]);
-      await touch(page, 'touchMove', [{ x: a.x + 30, y: a.y + 20 }, { x: a.x + 140, y: a.y + 110 }]);
-      await touch(page, 'touchEnd', [{ x: a.x + 30, y: a.y + 20 }]);
+      const moved = [{ x: a.x + 30, y: a.y + 20 }, { x: a.x + 140, y: a.y + 110 }];
+      await touch(page, 'touchMove', moved);
+      // 2 本目を先に離し、そのあと 1 本目を離す
+      await releaseOnly(page, moved[1], moved);
       await touch(page, 'touchEnd', []);
       expect(await page.locator('.rect-drawing').count()).toBe(0);
       expect(await page.locator('.redaction-rect').count()).toBe(0);
@@ -255,7 +276,7 @@ test.describe('モバイル対応', () => {
       await touch(page, 'touchMove', [a2]);
       await touch(page, 'touchStart', [a2, outside]);
       // 2 本目（ページの外）を先に離し、そのあと 1 本目を離す
-      await touch(page, 'touchEnd', [a2]);
+      await releaseOnly(page, outside, [a2, outside]);
       await touch(page, 'touchEnd', []);
       expect(await page.locator('.redaction-rect').count()).toBe(0);
       expect(await page.locator('.rect-drawing').count()).toBe(0);

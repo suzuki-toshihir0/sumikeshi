@@ -40,6 +40,8 @@ type Pbt = {
   multiTouch: boolean;
   /** 2 本指になった操作で、範囲ができた回数 */
   multiTouchRects: number;
+  /** この操作で全部の指を離した（打ち切られた）のが、2 本指になった操作だったか */
+  endedMulti: boolean;
   /** 2 本指のタッチで、アプリが preventDefault した回数（ピンチを止めた回数） */
   pinchPrevented: number;
 };
@@ -153,7 +155,7 @@ const ui = extract((s) => {
  */
 const installShim = registerCustomAction('installShim', async (document, window) => {
   const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
-  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, multiTouch: false, multiTouchRects: 0 };
+  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, multiTouch: false, multiTouchRects: 0, endedMulti: false };
   // 2 本指のタッチで、アプリが preventDefault したかを数える（window の聞き手は、アプリの聞き手の後に走る）
   for (const type of ['touchstart', 'touchmove']) {
     w.addEventListener(type, (e) => {
@@ -333,15 +335,17 @@ const touchAction = registerCustomAction(
         new w.TouchEvent(type, { touches: t, targetTouches: t.filter((x) => x.target === changed[0].target), changedTouches: c, bubbles: true, cancelable: true }),
       );
     };
-    const rects = () => document.querySelectorAll('.redaction-rect').length;
-    /** 指を全部離した（打ち切られた）とき、2 本指になった操作なら、範囲が増えていないかを記録する */
+    /** 指を全部離した（打ち切られた）とき、次の操作のために 2 本指の印を消す */
     const finish = (type: string, changed: Finger[]) => {
-      const before = rects();
       send(type, [], changed);
-      if (pbt.multiTouch && rects() > before) pbt.multiTouchRects++;
+      pbt.endedMulti = pbt.multiTouch;
       pbt.multiTouch = false;
     };
     const newFinger = (p: { x: number; y: number }, id: number): Finger => ({ ...p, id, target: document.elementFromPoint(p.x, p.y) ?? document.body });
+    // 2 本指になった操作の間は、どの出来事でも（2 本目を置く・動かす・片方だけ離す・全部離す）範囲が増えていないかを見る
+    const rects = () => document.querySelectorAll('.redaction-rect').length;
+    const before = rects();
+    pbt.endedMulti = false;
     const f = pbt.fingers;
     if (kind === 'down' && f.length === 0) {
       pbt.multiTouch = false;
@@ -372,6 +376,7 @@ const touchAction = registerCustomAction(
       send('touchstart', [finger], [finger]);
       send('touchend', [], [finger]);
     }
+    if ((pbt.multiTouch || pbt.endedMulti) && rects() > before) pbt.multiTouchRects++;
   },
 );
 const TOUCH_POINTS: [number, number][] = [
