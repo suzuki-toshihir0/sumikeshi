@@ -40,6 +40,12 @@ export class RectSelection {
     this.viewport = viewport;
   }
 
+  /** 頁の座標を外す（頁を描き直している間は、範囲を選ばない。途中のドラッグも捨てる） */
+  clearPageContext(): void {
+    this.viewport = null;
+    this.cancelDrag();
+  }
+
   private handleMouseDown = (e: MouseEvent): void => {
     if (!this.enabled || e.button !== 0) return;
     // 既存の墨消し矩形をクリックした場合はドラッグ開始しない

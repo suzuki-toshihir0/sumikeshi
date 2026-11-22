@@ -27,6 +27,11 @@ export class TextSelection {
     this.viewport = viewport;
   }
 
+  /** 頁の座標を外す（頁を描き直している間は、範囲を選ばない） */
+  clearPageContext(): void {
+    this.viewport = null;
+  }
+
   private handleMouseUp = (): void => {
     // mouseup発火時はselectionchangeのデバウンスをキャンセルして即確定
     if (this.selectionChangeTimer) {

@@ -42,6 +42,12 @@ export class SelectionManager {
     this.rectSelection.setPageContext(pageNum, viewport);
   }
 
+  /** 頁の座標を外す。頁を描き直している間は、前の頁の座標と頁番号で範囲を選ばない（描き終えたら setPageContext で戻す） */
+  clearPageContext(): void {
+    this.textSelection.clearPageContext();
+    this.rectSelection.clearPageContext();
+  }
+
   /** 選択を有効化する */
   enable(): void {
     this.active = true;

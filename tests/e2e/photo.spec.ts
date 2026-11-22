@@ -2,6 +2,7 @@ import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { PDFDocument, StandardFonts } from 'pdf-lib';
 import { addJpegMetadata, addPngMetadata, containsAscii } from './helpers/photo-meta';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -528,6 +529,70 @@ test.describe('写真の墨消し', () => {
     await page.locator('#file-input').setInputFiles(samplePdf);
     await waitForRender(page);
     await expect(page.locator('#page-info')).toContainText('1 / 2');
+  });
+
+  test('頁の描画が追い越されても、最後に頼んだ頁が残る', async ({ page }) => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    for (const label of ['PAGE-ONE', 'PAGE-TWO', 'PAGE-THREE']) doc.addPage([400, 300]).drawText(label, { x: 50, y: 150, size: 24, font });
+    const pdf = await doc.save();
+    await page.goto('/');
+    await openFile(page, 'three.pdf', pdf, 'application/pdf');
+    await waitForRender(page);
+    await expect(page.locator('#text-layer')).toContainText('PAGE-ONE');
+    // 次の Worker へのやり取り（2 頁目の取り寄せ）だけを 1.5 秒遅らせる
+    await page.evaluate(() => {
+      const post = Worker.prototype.postMessage;
+      let first = true;
+      Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+        const delay = first ? 1500 : 0;
+        first = false;
+        setTimeout(() => (post as (...a: unknown[]) => void).apply(this, args), delay);
+      } as typeof Worker.prototype.postMessage;
+    });
+    // 2 頁目を頼み、その描画が終わる前に 3 頁目を頼む
+    await page.locator('#btn-next').click();
+    await page.locator('#btn-next').click();
+    await page.waitForTimeout(3000);
+    await expect(page.locator('#page-info')).toContainText('3 / 3');
+    await expect(page.locator('#text-layer')).toContainText('PAGE-THREE');
+    await expect(page.locator('#text-layer')).not.toContainText('PAGE-TWO');
+  });
+
+  test('頁の描画の途中は、前の頁の座標で範囲を選ばない', async ({ page }) => {
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    for (const label of ['PAGE-ONE', 'PAGE-TWO']) doc.addPage([400, 300]).drawText(label, { x: 50, y: 150, size: 24, font });
+    await page.goto('/');
+    await openFile(page, 'two.pdf', await doc.save(), 'application/pdf');
+    await waitForRender(page);
+    await page.locator('#btn-rect-mode').click();
+    await page.evaluate(() => {
+      const post = Worker.prototype.postMessage;
+      let first = true;
+      Worker.prototype.postMessage = function (this: Worker, ...args: unknown[]) {
+        const delay = first ? 1500 : 0;
+        first = false;
+        setTimeout(() => (post as (...a: unknown[]) => void).apply(this, args), delay);
+      } as typeof Worker.prototype.postMessage;
+    });
+    await page.locator('#btn-next').click();
+    // 2 頁目の描画の途中（画面はまだ 1 頁目）にドラッグする
+    const box = (await page.locator('#pdf-canvas').boundingBox())!;
+    const drag = async () => {
+      await page.mouse.move(box.x + 30, box.y + 30);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 150, box.y + 90, { steps: 3 });
+      await page.mouse.up();
+    };
+    await drag();
+    await expect(page.locator('#page-info')).toContainText('2 / 2', { timeout: 5000 });
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
+    // 1 頁目にも付いていない
+    await page.locator('#btn-prev').click();
+    await expect(page.locator('#page-info')).toContainText('1 / 2');
+    await expect(page.locator('#text-layer')).toContainText('PAGE-ONE');
+    await expect(page.locator('.redaction-rect')).toHaveCount(0);
   });
 
   test('大きすぎる画像は開かずに理由を伝える', async ({ page }) => {

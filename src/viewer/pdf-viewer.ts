@@ -1,5 +1,5 @@
 import * as pdfjsLib from 'pdfjs-dist';
-import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from 'pdfjs-dist';
+import type { PDFDocumentProxy, PDFPageProxy, PageViewport, RenderTask } from 'pdfjs-dist';
 import { renderTextLayer } from './text-layer';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
@@ -14,8 +14,11 @@ export class PdfViewer {
   private _totalPages = 0;
   private _viewport: PageViewport | null = null;
   private scale = 1.5;
-  /** 読み込みの世代。読み込み・描画の途中で次の文書が開かれたら（画像を含む）、古い処理は canvas もコールバックも触らない */
+  /** 読み込みの世代。読み込みの途中で次の文書が開かれたら（画像を含む）、古い読み込みは文書を差し替えない */
   private generation = 0;
+  /** 描画の番号。最後に頼んだ描画だけが、canvas とコールバックを触る */
+  private renderSeq = 0;
+  private renderTask: RenderTask | null = null;
 
   private canvas: HTMLCanvasElement;
   private textLayerEl: HTMLElement;
@@ -23,6 +26,8 @@ export class PdfViewer {
 
   /** ページ変更時コールバック */
   onPageChange: ((pageNum: number, total: number) => void) | null = null;
+  /** 頁の描画を始めたときのコールバック（描き終えるまで、前の頁の座標を使わせない） */
+  onRenderStart: (() => void) | null = null;
   /** ページ描画完了コールバック */
   onPageRendered: ((pageNum: number, viewport: PageViewport) => void) | null = null;
 
@@ -83,44 +88,63 @@ export class PdfViewer {
     await this.renderPage(this._currentPageNumber);
   }
 
-  /** 指定ページを描画する */
+  /**
+   * 指定ページを描画する。最後に頼んだ描画だけを生かす（頁送りを続けて押したときや、墨消しの後の描き直しの最中に
+   * 頁を送ったとき、先に始めた描画が後から終わって、画面と座標を古い頁や古い文書に戻さないように）。
+   * 前の描画は取り消す（同じ canvas に 2 つの描画が混ざらないように）
+   */
   async renderPage(pageNum: number): Promise<void> {
-    if (!this.doc) return;
+    const doc = this.doc;
+    if (!doc) return;
     if (pageNum < 1 || pageNum > this._totalPages) return;
 
-    const generation = this.generation;
+    const seq = ++this.renderSeq;
+    const superseded = () => seq !== this.renderSeq;
+    this.onRenderStart?.();
     const pageChanged = pageNum !== this._currentPageNumber;
     this._currentPageNumber = pageNum;
-    const currentPage = await this.doc.getPage(pageNum);
-    if (generation !== this.generation) return;
-    this.currentPage = currentPage;
-    this.scale = this.calcFitWidthScale(this.currentPage);
-    this._viewport = this.currentPage.getViewport({ scale: this.scale });
+    const page = await doc.getPage(pageNum);
+    if (superseded()) return;
+    this.currentPage = page;
+    this.scale = this.calcFitWidthScale(page);
+    const viewport = page.getViewport({ scale: this.scale });
+    this._viewport = viewport;
 
     // Canvas描画（高DPIデバイス対応）
+    this.renderTask?.cancel();
     const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = this._viewport.width * dpr;
-    this.canvas.height = this._viewport.height * dpr;
-    this.canvas.style.width = `${this._viewport.width}px`;
-    this.canvas.style.height = `${this._viewport.height}px`;
+    this.canvas.width = viewport.width * dpr;
+    this.canvas.height = viewport.height * dpr;
+    this.canvas.style.width = `${viewport.width}px`;
+    this.canvas.style.height = `${viewport.height}px`;
     const ctx = this.canvas.getContext('2d')!;
     ctx.scale(dpr, dpr);
-    await this.currentPage.render({
-      canvasContext: ctx,
-      viewport: this._viewport,
-    }).promise;
-    if (generation !== this.generation) return;
+    const task = page.render({ canvasContext: ctx, viewport });
+    this.renderTask = task;
+    try {
+      await task.promise;
+    } catch (err) {
+      // 次の描画に取り消されたものは、何もしない
+      if (superseded()) return;
+      throw err;
+    }
+    if (superseded()) return;
 
     // テキストレイヤー描画
-    const textContent = await this.currentPage.getTextContent();
-    if (generation !== this.generation) return;
-    await renderTextLayer(this.textLayerEl, textContent, this._viewport);
-    if (generation !== this.generation) return;
+    const textContent = await page.getTextContent();
+    if (superseded()) return;
+    try {
+      await renderTextLayer(this.textLayerEl, textContent, viewport);
+    } catch (err) {
+      if (superseded()) return;
+      throw err;
+    }
+    if (superseded()) return;
 
     // 頁を移ったときは、その頁の先頭から見せる
     if (pageChanged) this.containerEl.scrollTop = 0;
     this.onPageChange?.(this._currentPageNumber, this._totalPages);
-    this.onPageRendered?.(this._currentPageNumber, this._viewport);
+    this.onPageRendered?.(this._currentPageNumber, viewport);
   }
 
   async nextPage(): Promise<void> {
@@ -134,6 +158,9 @@ export class PdfViewer {
   /** 文書を閉じる。読み込み・描画の途中のものも、この後は画面に触らない */
   destroy(): void {
     this.generation++;
+    this.renderSeq++;
+    this.renderTask?.cancel();
+    this.renderTask = null;
     this.doc?.destroy();
     this.doc = null;
     this.currentPage = null;

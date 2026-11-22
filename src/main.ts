@@ -78,6 +78,7 @@ class App {
       this.selection.setPageContext(pageNum, viewport);
       this.overlay.render(pageNum, viewport);
     };
+    this.viewer.onRenderStart = () => this.selection.clearPageContext();
     this.imageViewer.onPageRendered = (pageNum, viewport) => {
       this.selection.setPageContext(pageNum, viewport);
       this.overlay.render(pageNum, viewport);
