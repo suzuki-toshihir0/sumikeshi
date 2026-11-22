@@ -155,6 +155,16 @@ const installShim = registerCustomAction('installShim', async (document, window)
     true,
   );
 
+  // 墨消しの記録は、その文書のもの。新しい文書を開いたら捨てる（開き直した同じ文書の未加工の頁を、古い記録で調べない）。
+  // アプリは新しい文書を開くとダウンロードのボタンを隠す。墨消しを始めるときも隠すが、そのときは処理中（墨消しのボタンが押せない）
+  const download = document.getElementById('btn-download');
+  const redactButton = document.getElementById('btn-redact') as HTMLButtonElement | null;
+  if (download) {
+    new w.MutationObserver(() => {
+      if (download.hidden && !redactButton?.disabled) pbt.redact = null;
+    }).observe(download, { attributes: true, attributeFilter: ['hidden'] });
+  }
+
   // pdf.js の Worker へのやり取り: 順番を保ったまま遅らせる
   const post = w.Worker.prototype.postMessage;
   let last = 0;

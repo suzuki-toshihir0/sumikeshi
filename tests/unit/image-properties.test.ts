@@ -219,10 +219,10 @@ describe('detectFileKind の性質', () => {
       fc.property(notImage, fc.nat(1019), (prefix, at) => {
         const pos = Math.min(at, prefix.length);
         const bytes = new Uint8Array([...prefix.slice(0, pos), ...new TextEncoder().encode('%PDF-'), ...prefix.slice(pos)]);
-        // 前に置いたバイト列が、たまたま画像の印になる場合は除く
-        const head = detectFileKind(bytes.slice(0, Math.max(12, pos)));
-        if (head?.kind === 'image') return true;
-        return detectFileKind(bytes)?.kind === 'pdf';
+        // 差し込んだ後のバイト列が、たまたま画像の印になる場合（HEIF の互換の銘柄の位置がずれるなど）は除く
+        const kind = detectFileKind(bytes);
+        if (kind?.kind === 'image') return true;
+        return kind?.kind === 'pdf';
       }),
     );
   });
