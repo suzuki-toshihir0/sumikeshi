@@ -1,6 +1,22 @@
 import type { RedactionStore } from '../redaction/redaction-store';
 import { cssToPdfRect, type PageView } from '../utils/coordinates';
 
+/** タッチで描きかけの枠を出すまでの待ち（ミリ秒）。iPhone の記録で、ピンチの 2 本目は 1 本目の 11〜132 ミリ秒後に触れていた */
+const TOUCH_DRAW_DELAY_MS = 150;
+
+/**
+ * WebKit のタッチ（iOS の Safari と、iOS の Chrome などの WebKit を使うブラウザ）か。WebKit だけが GestureEvent を持つ。
+ * 1 本指の touchmove を止めるかは、エンジンで逆になる:
+ * - WebKit は、1 本目の指の touchmove を止めると、そのあと 2 本目の指が来てもピンチを受け付けない（iPhone の記録で、2 本目が
+ *   来る前に 1 本目が 4 ピクセル以上動いた 14 回は 1 回も拡大されず、動かなかった 6 回は 6 回とも拡大された）
+ * - Chromium は止めてもピンチを受け付ける。止めないと、1 本指のドラッグをブラウザが自分の操作として扱い、その直後（0.5 秒ほど）の
+ *   タップをクリックにしない
+ * 出来事のたびに見る（試験で GestureEvent を後から置いて WebKit を装えるように）
+ */
+function isWebKitTouch(): boolean {
+  return typeof (window as unknown as { GestureEvent?: unknown }).GestureEvent !== 'undefined' && navigator.maxTouchPoints > 0;
+}
+
 export class RectSelection {
   private enabled = false;
   private pageNum = 1;
@@ -11,6 +27,11 @@ export class RectSelection {
   private drawingEl: HTMLDivElement | null = null;
   /** タッチで描いているときの、描き始めた指の識別子 */
   private dragTouchId: number | null = null;
+  /** タッチで描いているときの、指の今の位置（ページの入れ物の中の座標） */
+  private lastX = 0;
+  private lastY = 0;
+  /** 描きかけの枠を出すまでの待ち（ピンチの 1 本目で枠が一瞬出ないように） */
+  private drawTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** 選択追加時コールバック */
   onSelectionAdded: (() => void) | null = null;
@@ -139,18 +160,33 @@ export class RectSelection {
     this.startY = touch.clientY - containerRect.top;
     this.isDragging = true;
     this.dragTouchId = touch.identifier;
+    this.lastX = this.startX;
+    this.lastY = this.startY;
+    // 描きかけの枠は、少し待ってから出す。ピンチでは 2 本目の指が 1 本目の少し後に触れる（iPhone の記録で 11〜132 ミリ秒後）。
+    // その間に 2 本目が来れば、枠を出さずに捨てる（cancelDrag）。待つ間に離しても、範囲にはする（handleTouchEnd）
+    this.drawTimer = setTimeout(() => {
+      this.drawTimer = null;
+      if (this.isDragging) this.showTouchDrawing();
+    }, TOUCH_DRAW_DELAY_MS);
+    // touchstart は、どのエンジンでも止めない。止めると、iOS の Safari（と Chromium）は、そのあと 2 本目の指が来てもピンチを
+    // 受け付けない。1 本指のスクロールは touch-action: pinch-zoom で防ぐ（touchmove の扱いは isWebKitTouch の注を参照）
+  };
 
+  /** タッチで描きかけの枠を出す（始点から今の指の位置まで） */
+  private showTouchDrawing(): void {
     this.drawingEl = document.createElement('div');
     this.drawingEl.className = 'rect-drawing';
-    this.drawingEl.style.left = `${this.startX}px`;
-    this.drawingEl.style.top = `${this.startY}px`;
-    this.drawingEl.style.width = '0px';
-    this.drawingEl.style.height = '0px';
     this.overlayEl.appendChild(this.drawingEl);
-    // ここでは preventDefault しない。1 本目の指の touchstart を止めると、iOS はそのあと 2 本目の指が来ても
-    // ピンチを受け付けない（指が同時に触れたときだけピンチになる）。1 本指のスクロールは touch-action: pinch-zoom と
-    // touchmove の preventDefault で防ぐ
-  };
+    this.updateTouchDrawing();
+  }
+
+  private updateTouchDrawing(): void {
+    if (!this.drawingEl) return;
+    this.drawingEl.style.left = `${Math.min(this.startX, this.lastX)}px`;
+    this.drawingEl.style.top = `${Math.min(this.startY, this.lastY)}px`;
+    this.drawingEl.style.width = `${Math.abs(this.lastX - this.startX)}px`;
+    this.drawingEl.style.height = `${Math.abs(this.lastY - this.startY)}px`;
+  }
 
   /** どこかで 2 本目の指が触れたら、描きかけの枠を捨てる（ピンチとしてブラウザに任せる） */
   private handleAnyTouchStart = (e: TouchEvent): void => {
@@ -163,7 +199,7 @@ export class RectSelection {
   }
 
   private handleTouchMove = (e: TouchEvent): void => {
-    if (!this.isDragging || !this.drawingEl) return;
+    if (!this.isDragging || this.dragTouchId === null) return;
     // 2 本指になったら、ピンチとしてブラウザに任せる
     if (e.touches.length > 1) {
       this.cancelDrag();
@@ -173,24 +209,16 @@ export class RectSelection {
     const touch = this.dragTouch(e.touches);
     if (!touch) return;
     const containerRect = this.pageContainerEl.getBoundingClientRect();
-    const currentX = touch.clientX - containerRect.left;
-    const currentY = touch.clientY - containerRect.top;
-
-    const left = Math.min(this.startX, currentX);
-    const top = Math.min(this.startY, currentY);
-    const width = Math.abs(currentX - this.startX);
-    const height = Math.abs(currentY - this.startY);
-
-    this.drawingEl.style.left = `${left}px`;
-    this.drawingEl.style.top = `${top}px`;
-    this.drawingEl.style.width = `${width}px`;
-    this.drawingEl.style.height = `${height}px`;
-
-    e.preventDefault();
+    this.lastX = touch.clientX - containerRect.left;
+    this.lastY = touch.clientY - containerRect.top;
+    this.updateTouchDrawing();
+    // WebKit のタッチでは止めない（止めるとピンチを受け付けなくなる）。Chromium では止める（isWebKitTouch の注を参照）
+    if (!isWebKitTouch()) e.preventDefault();
   };
 
+
   private handleTouchEnd = (e: TouchEvent): void => {
-    if (!this.isDragging || !this.drawingEl || !this.viewport) return;
+    if (!this.isDragging || this.dragTouchId === null || !this.viewport) return;
     // まだほかの指が触れていれば 2 本指の操作なので、範囲にしない
     if (e.touches.length > 0) {
       this.cancelDrag();
@@ -220,7 +248,9 @@ export class RectSelection {
       this.onSelectionAdded?.();
     }
 
-    this.drawingEl.remove();
+    if (this.drawTimer) clearTimeout(this.drawTimer);
+    this.drawTimer = null;
+    this.drawingEl?.remove();
     this.drawingEl = null;
   };
 
@@ -230,6 +260,8 @@ export class RectSelection {
 
   /** 描きかけの枠を捨てる。参照を失った枠が残っていても、まとめて消す */
   cancelDrag(): void {
+    if (this.drawTimer) clearTimeout(this.drawTimer);
+    this.drawTimer = null;
     this.isDragging = false;
     this.dragTouchId = null;
     this.drawingEl = null;
