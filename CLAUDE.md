@@ -118,7 +118,10 @@ PDF の墨消しとは別の道で、Worker も pdf-lib も使わない。範囲
 - **モバイルE2Eはprojects分離**: `playwright.config.ts` の `projects` でdesktop/mobileを振り分け。モバイルは `devices['iPhone 14']` + Chromium（CDPセッション利用のため）。
 - **タッチドラッグ**: Playwrightの `page.touchscreen` は `tap()` のみ提供。ドラッグはCDP `Input.dispatchTouchEvent` で `touchStart` → `touchMove`（複数ステップ）→ `touchEnd` を送る。
 - **タッチの CDP のセッションは使い回す**: `Input.dispatchTouchEvent` の指の状態はセッションごとに持たれる。触れる・動かす・離すを別々のセッションで送ると「Must send a TouchStart first」で失敗する
-- **本物のピンチ（ブラウザの拡大）は試せない**: 画面を出さない Chromium では、`Input.synthesizePinchGesture` のタッチの操作で倍率が変わらない（何も開いていない画面でも）。マウスの側の操作は効くが `touch-action` を無視するので代わりにならない。E2E では、アプリがピンチを止めていないこと（`touch-action` と、2 本指で preventDefault しないこと）を確かめ、拡大そのものは iPhone で確かめる
+- **ピンチ（ブラウザの拡大）は、`Input.dispatchTouchEvent` で 2 本の指を広げて試す**: 画面を出さない Chromium でも、2 本の指の `touchStart` と `touchMove` を送れば実際に拡大し、`visualViewport.scale` が上がる。`Input.synthesizePinchGesture` のタッチの操作では倍率が変わらない（何も開いていない画面でも）ので使わない。マウスの側の操作は `touch-action` を無視するので代わりにならない。1 本目の指の `touchstart` で `preventDefault` すると、Chromium でも iOS の Safari でも、そのあと 2 本目の指が来てもピンチを受け付けない
+- **1 本指の touchmove を止めるかは、エンジンで逆になる**（`rect-selection.ts` の `isWebKitTouch`）: iOS の Safari（WebKit のタッチ）は、1 本目の指の `touchstart` か `touchmove` を止めると、そのあと 2 本目の指が来てもピンチを受け付けない（iPhone の記録で確かめた）。Chromium は止めてもピンチを受け付け、止めないと 1 本指のドラッグをブラウザが自分の操作として扱って、その直後（0.5 秒ほど）のタップをクリックにしない。そこで `touchstart` はどちらでも止めず、`touchmove` は WebKit のタッチ（`GestureEvent` があり、`navigator.maxTouchPoints > 0`）でだけ止めない。E2E と Bombadil は、`GestureEvent`（と Bombadil では `maxTouchPoints`）を置いて iOS を装い、両方の道を試す
+- **描きかけの枠は、タッチでは 150 ミリ秒たってから出す**: ピンチの 2 本目は 1 本目の少し後に触れる（iPhone の記録で 11〜132 ミリ秒後）。その間に枠を出すと、ピンチのたびに枠が一瞬見える
+- **指の一部を離す**: この版の Chromium は `touchEnd` に渡した指を離す（CDP の説明とは食い違う）。試験では、ページが受け取った `touchstart`・`touchend` の識別子で、意図した指が離れたことを確かめる
 - **テキスト選択モードのモバイルE2Eは未実装**: テキスト選択モード（`text-selection.ts`）はモバイルで `selectionchange` イベントのデバウンス（500ms）経由で動作するが、E2Eテストが困難なため意図的にスキップしている。理由: モバイルのテキスト選択はOS/ブラウザのネイティブlong-press動作に依存しており、Playwrightにはlong-press APIがない。CDPで `touchStart` を長時間保持してもChromiumがネイティブテキスト選択として認識する保証がなく、テストが不安定になる。
 
 ## コーディング規約

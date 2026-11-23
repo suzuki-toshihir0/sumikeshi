@@ -38,12 +38,18 @@ type Pbt = {
   fingers: { x: number; y: number; id: number; target: Element }[];
   /** いまの指の操作（最初の指を置いてから全部離すまで）で、2 本目の指が触れたか */
   multiTouch: boolean;
-  /** 2 本指になった操作で、範囲ができた回数 */
+  /** 2 本指になった操作で、範囲の数が変わった（できた・消えた）回数 */
   multiTouchRects: number;
+  /** WebKit のタッチ（iOS）を装っているか（GestureEvent を置いた） */
+  webkit: boolean;
+  /** WebKit のタッチを装っているときに、1 本指の touchmove をアプリが preventDefault した回数 */
+  webkitMovePrevented: number;
   /** この操作で全部の指を離した（打ち切られた）のが、2 本指になった操作だったか */
   endedMulti: boolean;
   /** 2 本指のタッチで、アプリが preventDefault した回数（ピンチを止めた回数） */
   pinchPrevented: number;
+  /** 指が触れた時点（touchstart）で、アプリが preventDefault した回数（1 本目でも止めると、iOS はそのあとのピンチを受け付けない） */
+  touchstartPrevented: number;
 };
 
 /** 知らせてよい（想定どおりの）知らせの書き出し */
@@ -132,7 +138,10 @@ const ui = extract((s) => {
     shownSeq: pbt?.shownSeq ?? 0,
     fingers: pbt?.fingers.length ?? 0,
     pinchPrevented: pbt?.pinchPrevented ?? 0,
+    touchstartPrevented: pbt?.touchstartPrevented ?? 0,
     multiTouchRects: pbt?.multiTouchRects ?? 0,
+    webkit: pbt?.webkit ?? false,
+    webkitMovePrevented: pbt?.webkitMovePrevented ?? 0,
     /** 描きかけの枠（.rect-drawing）の数 */
     drawings: d.querySelectorAll('.rect-drawing').length,
     rectMode: !!q('#btn-rect-mode')?.classList.contains('active'),
@@ -155,11 +164,13 @@ const ui = extract((s) => {
  */
 const installShim = registerCustomAction('installShim', async (document, window) => {
   const w = window as unknown as Window & typeof globalThis & { __pbt: Pbt };
-  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, multiTouch: false, multiTouchRects: 0, endedMulti: false };
+  const pbt: Pbt = { alerts: [], redact: null, pending: { rev: '', pages: {} }, lastFile: null, shownSeq: 0, fingers: [], pinchPrevented: 0, touchstartPrevented: 0, multiTouch: false, multiTouchRects: 0, endedMulti: false, webkit: false, webkitMovePrevented: 0 };
   // 2 本指のタッチで、アプリが preventDefault したかを数える（window の聞き手は、アプリの聞き手の後に走る）
   for (const type of ['touchstart', 'touchmove']) {
     w.addEventListener(type, (e) => {
       if ((e as TouchEvent).touches.length > 1 && e.defaultPrevented) pbt.pinchPrevented++;
+      if (type === 'touchstart' && e.defaultPrevented) pbt.touchstartPrevented++;
+      if (type === 'touchmove' && pbt.webkit && (e as TouchEvent).touches.length === 1 && e.defaultPrevented) pbt.webkitMovePrevented++;
     });
   }
   let fileSeq = 0;
@@ -376,9 +387,18 @@ const touchAction = registerCustomAction(
       send('touchstart', [finger], [finger]);
       send('touchend', [], [finger]);
     }
-    if ((pbt.multiTouch || pbt.endedMulti) && rects() > before) pbt.multiTouchRects++;
+    if ((pbt.multiTouch || pbt.endedMulti) && rects() !== before) pbt.multiTouchRects++;
   },
 );
+/** WebKit のタッチ（iOS）を装う。アプリは GestureEvent の有無で、1 本指の touchmove を止めるかを決める */
+const emulateWebKit = registerCustomAction('emulateWebKit', async (_document, window) => {
+  const w = window as unknown as Window & { __pbt: Pbt; GestureEvent?: unknown };
+  w.GestureEvent = function GestureEvent() {};
+  // アプリは、タッチの画面であること（maxTouchPoints > 0）も見る。Bombadil の Chrome はタッチの画面ではないので、これも装う
+  Object.defineProperty(w.navigator, 'maxTouchPoints', { get: () => 5, configurable: true });
+  w.__pbt.webkit = true;
+});
+
 const TOUCH_POINTS: [number, number][] = [
   [0.15, 0.15],
   [0.4, 0.3],
@@ -410,6 +430,7 @@ export const all = weighted([
   [1, resize],
   [3, waits],
   [4, touches],
+  [1, actions(() => (ui.current.webkit ? [] : [emulateWebKit()])).when(ready)],
 ]);
 
 // ---- 性質 ----
@@ -494,8 +515,17 @@ export const rectModeAllowsPinch = always(() => {
   return u.touchAction === 'pinch-zoom';
 });
 
-/** 2 本目の指が触れた操作（ピンチ）では、範囲を作らない（2 本目の指がページの外でも、先に離しても） */
+/** 2 本目の指が触れた操作（ピンチ）では、範囲を作らず、消しもしない（2 本目の指がページの外でも、先に離しても、枠の上で離しても） */
 export const multiTouchMakesNoRect = always(() => ui.current.multiTouchRects === 0);
+
+/**
+ * 指が触れた時点（touchstart）では、指が何本でもアプリが preventDefault しない。
+ * 1 本目の指の touchstart を止めると、iOS の Safari（と Chromium）は、そのあと 2 本目の指が来てもピンチを受け付けない
+ */
+export const touchStartIsNotPrevented = always(() => ui.current.touchstartPrevented === 0);
+
+/** WebKit のタッチ（iOS）では、1 本指の touchmove もアプリが preventDefault しない（止めると iOS はピンチを受け付けない） */
+export const webkitTouchMoveIsNotPrevented = always(() => ui.current.webkitMovePrevented === 0);
 
 /** 2 本指のタッチで、アプリが preventDefault しない（ブラウザがピンチとして扱える） */
 export const pinchIsNotPrevented = always(() => ui.current.pinchPrevented === 0);
